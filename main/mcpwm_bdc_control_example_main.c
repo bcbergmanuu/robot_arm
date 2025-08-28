@@ -32,7 +32,8 @@ static const char *TAG = "example";
 #define BDC_ENCODER_PCNT_LOW_LIMIT    -1000
 
 #define BDC_PID_LOOP_VELOCITY_PERIOD_MS       2   // calculate the motor speed every 10ms
-#define BDC_PID_EXPECT_SPEED          100 // expected motor speed, in the pulses counted by the rotary encoder
+#define BDC_PID_EXPECT_SPEED          30 // expected motor speed, in the pulses counted by the rotary encoder
+#define EPSILON_OFFSET                2000
 
 typedef struct {
     bdc_motor_handle_t motor;
@@ -51,6 +52,7 @@ typedef struct {
 static void pid_velocity_loop_cb(void *args)
 {
     static int last_pulse_count = 0;
+
     motor_control_context_t *ctx = (motor_control_context_t *)args;            
     bdc_motor_handle_t motor = ctx->motor;
 
@@ -60,10 +62,18 @@ static void pid_velocity_loop_cb(void *args)
     ctx->velocity = cur_pulse_count - last_pulse_count;
     last_pulse_count = cur_pulse_count;
     
-
     ctx->new_torque = 0;
+    
+    //float error = 0;
+    //"good enough strategy" only control offset
+    // if(abs(ctx->real_pulses - ctx->setpoint) < EPSILON_OFFSET) {
+    //     pid_compute(ctx->pid_velocity, ctx->real_pulses - ctx->setpoint, &ctx->new_torque); 
+    // } else {
+    pid_compute(ctx->pid_velocity, ctx->velocity + ctx->velocity_setpoint, &ctx->new_torque);    
+    
     //pid velocity(speed);
-    pid_compute(ctx->pid_velocity, ctx->velocity + ctx->velocity_setpoint, &ctx->new_torque);
+
+    
         
     if(ctx->new_torque > 0) {
         bdc_motor_forward(motor);                
@@ -156,9 +166,9 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Create PID control blocks");
     pid_ctrl_parameter_t pid_velocity_param = {
-        .kp = 0.4,
+        .kp = 0.3,
         .ki = 0.1,
-        .kd = 0.4,
+        .kd = 0.2,
         .cal_type = PID_CAL_TYPE_INCREMENTAL,
         .max_output   = BDC_MCPWM_DUTY_TICK_MAX - 1,
         .min_output   = -BDC_MCPWM_DUTY_TICK_MAX,
@@ -173,7 +183,7 @@ void app_main(void)
     pid_ctrl_parameter_t pid_position_param = {
         .kp = 0.02,
         .ki = 0.01,
-        .kd = 0.04,
+        .kd = 0.02,
         .cal_type = PID_CAL_TYPE_POSITIONAL,
         .max_output   = BDC_PID_EXPECT_SPEED - 1,
         .min_output   = -BDC_PID_EXPECT_SPEED,
@@ -217,7 +227,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Start pid control loops");
     ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_velocity_timer, BDC_PID_LOOP_VELOCITY_PERIOD_MS * 1000));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_position_timer, BDC_PID_LOOP_VELOCITY_PERIOD_MS * 50 * 1000));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_position_timer, BDC_PID_LOOP_VELOCITY_PERIOD_MS * 10 * 1000));
 
     const esp_timer_create_args_t runprogram = {
         .callback = program_cb,
@@ -226,7 +236,7 @@ void app_main(void)
     };
     esp_timer_handle_t program_timer = NULL;
     ESP_ERROR_CHECK(esp_timer_create(&runprogram, &program_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(program_timer, 1000 * 1000 * 10));
+    //ESP_ERROR_CHECK(esp_timer_start_periodic(program_timer, 1000 * 1000 * 60));
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(400));
