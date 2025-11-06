@@ -6,10 +6,9 @@
 extern "C" {
 #endif
 
-//position + velocity + current
-#define setpoints_num 3
+#include "motor_pid.h"
 
-extern const char *nvs_pid_keys[setpoints_num];
+extern const char *nvs_pid_keys[pid_control_count];
 
 typedef union {
     struct {
@@ -20,10 +19,10 @@ typedef union {
     uint64_t bits;
 } pid_ctrl_parameter_store;
 
-extern pid_ctrl_parameter_store pid_stored_values[setpoints_num];
+extern pid_ctrl_parameter_store pid_stored_values[pid_control_count];
 
 int store_nvs(uint64_t *values, const char **keys, size_t amount);
-int read_nvs(uint64_t **values, const char **keys, size_t amount);
+int read_nvs(uint64_t *values, const char **keys, size_t amount);
 
 #ifdef __cplusplus
 }

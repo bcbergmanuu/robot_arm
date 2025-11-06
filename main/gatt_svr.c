@@ -1,3 +1,4 @@
+#include "esp_log.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -7,13 +8,18 @@
 #include "services/gatt/ble_svc_gatt.h"
 
 #include "storage.h"
+#include "motor_pid.h"
+
+
+#define NVS_PIDVALUE_BLE_TASK 0
+static const char *tag = "gatt_srv";
 
 
 
 // static const char *manuf_name = "Robot Arm";
 // static const char *model_num = "hinch";
 
-uint16_t pid_ble_values[setpoints_num * 3]; //pid controls * (p+i+d) * 16bit * setting^-1
+uint16_t pid_ble_values[pid_control_count * 3]; //pid controls * (p+i+d) * 16bit * setting^-1
 
 static const ble_uuid128_t svc_uuid =
     BLE_UUID128_INIT(0x00, 0x00, 0x00, 0x10, 0x11, 0x11, 0x12, 0x12,
@@ -81,11 +87,32 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     },
 };
 
-static int store_received() {    
-    return store_nvs((uint64_t*)pid_stored_values, nvs_pid_keys, setpoints_num);    
+TaskHandle_t taskBLEReceived = NULL;
+void store_received(void *pvParameter)
+{
+    ESP_LOGI(tag, "store task started");
+    uint32_t ulInterruptStatus;
+    while (1) {    
+       
+        xTaskNotifyWaitIndexed(NVS_PIDVALUE_BLE_TASK,                  /* Wait for 0th Notificaition */
+                                0x00,               /* Don't clear any bits on entry. */
+                                ULONG_MAX,          /* Clear all bits on exit. */
+                                &ulInterruptStatus, /* Receives the notification value. */
+                                portMAX_DELAY );    /* Block indefinitely. */
+
+        // //    if(xSemaphoreTake( xSemaphoreBLE, portMAX_DELAY ) == pdTRUE) {
+        
+        for (size_t i = 0; i < pid_control_count; i++)
+        {
+            ESP_LOGI(tag, "pid control %s: %d, %d, %d", nvs_pid_keys[i], pid_stored_values[i].kp, pid_stored_values[i].ki, pid_stored_values[i].kd);
+        }
+    
+        store_nvs((uint64_t*)pid_stored_values, nvs_pid_keys, pid_control_count);
+        update_pid_params();
+    }    
 }
 
-static int apply_received() { return 0;};
+
 
 static int gatt_svr_access_setting(uint16_t conn_handle, uint16_t attr_handle,
                                struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -106,14 +133,21 @@ static int gatt_svr_access_setting(uint16_t conn_handle, uint16_t attr_handle,
             //     for (int i = 0; i < pid_value_num; i++) {
             //     MODLOG_DFLT(INFO, "%02x ", pid_values[i]);
             // }
-            for(int controller = 0; controller < setpoints_num; controller ++) {
-                pid_stored_values[controller].kp = pid_ble_values[controller * setpoints_num];
-                pid_stored_values[controller].ki = pid_ble_values[controller * setpoints_num + 1];
-                pid_stored_values[controller].kd = pid_ble_values[controller * setpoints_num + 2];
-            }
 
-            store_received();
-            apply_received();
+            for(int controller = 0; controller < pid_control_count; controller ++) {                
+                pid_stored_values[controller].kp = pid_ble_values[0 + controller *3];
+                pid_stored_values[controller].ki = pid_ble_values[1 + controller *3];
+                pid_stored_values[controller].kd = pid_ble_values[2 + controller *3];            
+            }
+            
+
+            BaseType_t xHigherPriorityTaskWoken;
+            uint32_t ulStatusRegister = 0;
+                                   
+            xHigherPriorityTaskWoken = pdFALSE;
+            xTaskNotifyIndexedFromISR(taskBLEReceived, NVS_PIDVALUE_BLE_TASK, ulStatusRegister, eNoAction, &xHigherPriorityTaskWoken);
+            
+            // apply_received();
             return err;
         }    
     
@@ -168,5 +202,18 @@ int gatt_svr_init(void)
         return rc;
     }
 
-    return 0;
+        // Create the task
+    BaseType_t result = xTaskCreate(
+        store_received,           // Task function
+        "pid_update_task",          // Task name (for debugging)
+        4096,              // Stack size in words (e.g., 2048 = 8 KB on ESP32) (this is tested and needed for nvs! BB)
+        NULL,              // Task input parameter
+        tskIDLE_PRIORITY,  // Priority (higher number = higher priority)
+        &taskBLEReceived       // Task handle (optional, can be NULL)
+    );
+    
+    ESP_LOGI(tag, "task created with return value: %d", result);
+
+
+    return rc;
 }

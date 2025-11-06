@@ -7,12 +7,12 @@
 
 static const char *tag = "storage";
 
-const char *nvs_pid_keys[setpoints_num] = {"pid_cur", "pid_vel", "pid_pos"};
+const char *nvs_pid_keys[pid_control_count] = {"pid_vel", "pid_pos"};
 
-pid_ctrl_parameter_store pid_stored_values[setpoints_num];
+pid_ctrl_parameter_store pid_stored_values[pid_control_count];
 
 /// @brief position + velocity + current
-uint16_t setpoints[setpoints_num];
+uint16_t setpoints[pid_control_count];
 
 
 /// @brief Store values to nvs
@@ -49,7 +49,7 @@ int store_nvs(uint64_t *values, const char **keys, size_t amount) {
     return err;
 }
 
-int read_nvs(uint64_t **values, const char **keys, size_t amount) {
+int read_nvs(uint64_t *values, const char **keys, size_t amount) {
     
     nvs_handle_t nvs_handle_read;
     int err =0;
@@ -62,10 +62,11 @@ int read_nvs(uint64_t **values, const char **keys, size_t amount) {
 
     for (size_t i = 0; i < amount; i++)  {    
         ESP_LOGI(tag, "Reading from NVS");
-        err = nvs_get_u64(nvs_handle_read, keys[i], values[i]);
+        err = nvs_get_u64(nvs_handle_read, keys[i], &values[i]);
+        
         switch (err) {
             case ESP_OK:
-                ESP_LOGI(tag, "read back value" PRIu16, *values[i]);
+                ESP_LOGI(tag, "read back value" PRIu16, values[i]);
                 break;
             case ESP_ERR_NVS_NOT_FOUND:
                 ESP_LOGW(tag, "The value is not initialized yet!");
@@ -77,5 +78,5 @@ int read_nvs(uint64_t **values, const char **keys, size_t amount) {
     }
     nvs_close(nvs_handle_read);
 
-    return err;
+    return err;    
 }

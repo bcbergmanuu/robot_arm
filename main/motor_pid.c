@@ -21,175 +21,161 @@
 #define BDC_MCPWM_TIMER_RESOLUTION_HZ 10000000 // 10MHz, 1 tick = 0.1us
 #define BDC_MCPWM_FREQ_HZ             25000    // 25KHz PWM
 #define BDC_MCPWM_DUTY_TICK_MAX       (BDC_MCPWM_TIMER_RESOLUTION_HZ / BDC_MCPWM_FREQ_HZ) // maximum value we can set for the duty cycle, in ticks
-#define BDC_MCPWM_GPIO_A              44
-#define BDC_MCPWM_GPIO_B              7
+#define BDC_MCPWM_GPIO_A              7
+#define BDC_MCPWM_GPIO_B              44
 
-#define BDC_ENCODER_GPIO_A            8
-#define BDC_ENCODER_GPIO_B            9
+#define BDC_ENCODER_GPIO_A            9
+#define BDC_ENCODER_GPIO_B            8
 //#define BDC_ENCODER_PCNT_HIGH_LIMIT   10000
 //#define BDC_ENCODER_PCNT_LOW_LIMIT    -10000
 
-#define BDC_PID_LOOP_VELOCITY_PERIOD_MS       2   // calculate the motor speed every x ms
-#define BDC_PID_EXPECT_SPEED          30 // expected motor speed, in the pulses counted by the rotary encoder
-#define EPSILON_OFFSET                2000
 
 
+static int position_setpoint = 0;
 static const char *TAG = "motor_pid";
 
 typedef struct {
     bdc_motor_handle_t motor;
     pcnt_unit_handle_t pcnt_encoder;
-    pid_ctrl_block_handle_t pid_velocity;
-    pid_ctrl_block_handle_t pid_position;    
-    int real_pulses;
+    pid_ctrl_block_handle_t pid_controls[pid_control_count];    
+    int position;
     int velocity;
-    float new_torque;
-    float velocity_setpoint;
-    int setpoint;
+    float pid_out[pid_control_count];        
     
 } motor_control_context_t;
 
-//inner loop
-static void pid_velocity_loop_cb(void *args)
-{
-    static int last_pulse_count = 0;
 
-    motor_control_context_t *ctx = (motor_control_context_t *)args;            
-    bdc_motor_handle_t motor = ctx->motor;
-
+static void encoder_update(motor_control_context_t *ctx) {    
     int cur_pulse_count = 0;
     pcnt_unit_get_count(ctx->pcnt_encoder, &cur_pulse_count);
-    ctx->real_pulses = cur_pulse_count + last_pulse_count;
-    ctx->velocity = cur_pulse_count - last_pulse_count;
-    last_pulse_count = cur_pulse_count;
+    pcnt_unit_clear_count(ctx->pcnt_encoder);
+    ctx->position += cur_pulse_count;
+    ctx->velocity = cur_pulse_count;    
+}
+
+static void pid_position_cb(motor_control_context_t *ctx)
+{             
+    pid_compute(ctx->pid_controls[position], -ctx->position + position_setpoint, &ctx->pid_out[position]);
+}
+
+void print_task(motor_control_context_t *ctx) {
+
+    ESP_LOGI(TAG, "pos_atc: %d, vel_act: %d, pid_pos: %f, pid_vel: %f", ctx->position, ctx->velocity, ctx->pid_out[position], ctx->pid_out[velocity]);    
+}
+
+//inner loop -- torque (I) control
+static void pid_loop_cb(void *args)
+{    
+    motor_control_context_t *ctx = (motor_control_context_t *)args;     
     
-    ctx->new_torque = 0;
+    encoder_update(ctx);
     
-    pid_compute(ctx->pid_velocity, ctx->velocity + ctx->velocity_setpoint, &ctx->new_torque);         
+    static int inner_loop_cnt = 0, display_cnt = 0;  
+    
+    if(inner_loop_cnt > 10) {
+        inner_loop_cnt = 0;
+        pid_position_cb(ctx);
+    }
+    if(display_cnt > 1000) {
+        display_cnt = 0;
+        print_task(ctx);
+    }
+             
+    bdc_motor_handle_t motor = ctx->motor;
+            
+    pid_compute(ctx->pid_controls[velocity], (ctx->pid_out[position]), &ctx->pid_out[velocity]);         
         
-    if(ctx->new_torque > 0) {
+    if(ctx->pid_out[velocity] > 0) {
         bdc_motor_forward(motor);                
     } else {
         bdc_motor_reverse(motor);
     }
 
-    bdc_motor_set_speed(motor, (uint32_t)abs((int)ctx->new_torque));
+    bdc_motor_set_speed(motor, (uint32_t)abs((int)ctx->pid_out[velocity]));
+
+    inner_loop_cnt++; 
+    display_cnt++;
 }
 
-//outer loop
-static void pid_positon_loop_cb(void *args)
-{
-    
-    motor_control_context_t *ctx = (motor_control_context_t *)args;     
 
-    // get the result from rotary encoder
-  
- 
-    ctx->velocity_setpoint = 0;
-    
-     //pid torque(position)
-    pid_compute(ctx->pid_position, ctx->real_pulses - ctx->setpoint, &ctx->velocity_setpoint);        
-}
 
-static void program_cb(void *args) {    
-    motor_control_context_t *ctx = (motor_control_context_t *)args;     
-    if (ctx->setpoint == 0) {
-        ctx->setpoint = 100000;
-    } else {
-        ctx->setpoint = 0;
-    }
-}
 
-enum pid_control_names {
-    current = 0,
-    velocity = 1,
-    position = 2,
-};
+// static void program_cb(void *args) {    
+//     motor_control_context_t *ctx = (motor_control_context_t *)args;     
+//     if (ctx->setpoint == 0) {
+//         ctx->setpoint = 100000;
+//     } else {
+//         ctx->setpoint = 0;
+//     }
+// }
 
-pid_ctrl_block_handle_t pid_ctrls[setpoints_num];
 
-pid_ctrl_parameter_t pid_current_params[setpoints_num] = { 
 
+pid_ctrl_block_handle_t pid_ctrls[pid_control_count];
+
+pid_ctrl_parameter_t pid_params[pid_control_count] = { 
+    //velocity
     {
-        //current
-        .kp = 0.5,
-        .ki = .2,
-        .kd = .1,
         .cal_type = PID_CAL_TYPE_INCREMENTAL,
         .max_output   = BDC_MCPWM_DUTY_TICK_MAX - 1,
         .min_output   = -BDC_MCPWM_DUTY_TICK_MAX,
         .max_integral = 1000,
         .min_integral = -1000,
     },
-    {
-        //velocity
-        .kp = 0.5,
-        .ki = .2,
-        .kd = .1,
-        .cal_type = PID_CAL_TYPE_INCREMENTAL,
-        .max_output   = BDC_MCPWM_DUTY_TICK_MAX - 1,
-        .min_output   = -BDC_MCPWM_DUTY_TICK_MAX,
+    //position
+    {        
+        .cal_type = PID_CAL_TYPE_INCREMENTAL,        
         .max_integral = 1000,
         .min_integral = -1000,
-    },
-    {    
-        //position
-        .kp = 0.5,
-        .ki = .2,
-        .kd = .1,
-        .cal_type = PID_CAL_TYPE_POSITIONAL,
-        .max_output   = BDC_PID_EXPECT_SPEED - 1,
-        .min_output   = -BDC_PID_EXPECT_SPEED,
-        .max_integral = 100,
-        .min_integral = -100,
     }
 };
-
-pid_ctrl_parameter_t list[4];
 
 int update_pid_params() {
     int err = 0;
     //nvs get initial pid_values    
-    uint64_t testarr[3];
-    //(pid_ctrl_parameter_store*)pid_stored_values
-    err = read_nvs((uint64_t *)testarr, nvs_pid_keys, setpoints_num);
     
-    for(int num = 0; num < setpoints_num; num++) {
-        pid_current_params[num].kp = pid_stored_values[num].kd;
-        pid_current_params[num].ki = pid_stored_values[num].ki;
-        pid_current_params[num].kd = pid_stored_values[num].kd;
+    uint64_t readvalues[pid_control_count];
+    err = read_nvs(readvalues, nvs_pid_keys, pid_control_count);    
+
+    for(int x = 0; x< pid_control_count; x++) {
+        pid_ctrl_parameter_store store;
+        store.bits = readvalues[x];
+        pid_params[x].kp = (float)store.kp/1000;
+        pid_params[x].ki = (float)store.ki/1000;
+        pid_params[x].kd = (float)store.kd/1000;
+        ESP_LOGI(TAG, "wrote values to controller %s: P:%f I:%f D:%f", nvs_pid_keys[x], pid_params[x].kp, pid_params[x].ki, pid_params[x].kd);
+
+        err |= pid_update_parameters(pid_ctrls[x], &pid_params[x]);
     }
 
-    for(int pidcontrol = 0; pidcontrol < setpoints_num; pidcontrol++) {
-        err |= pid_update_parameters(pid_ctrls[pidcontrol], &pid_current_params[pidcontrol]);    
-    }
-    return err;
+    if(err != ESP_OK) {        
+        return 0;
+    }         
+
+    return err; 
 }
 
-void print_task() {
 
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        // the following logging format is according to the requirement of serial-studio frame format
-        // also see the dashboard config file `serial-studio-dashboard.json` for more information
-        //#if SERIAL_STUDIO_DEBUG
-        // printf("position_actual:\t%d\r\n", motor_ctrl_ctx.real_pulses);
-        // printf("torque_setpoint:\t%f \r\n", motor_ctrl_ctx.new_torque);
-        // printf("velocity_setpoint:\t%f \r\n", motor_ctrl_ctx.velocity_setpoint);
-        // printf("velocity_actual:\t%d \r\n", motor_ctrl_ctx.velocity);
-        
-        //#endif
-    }
+int set_velocity(int velocity) {
+    pid_params[position].max_output = velocity;
+    pid_params[position].min_output = -velocity;
+    return 0;
 }
+
+int set_position(int new_position) {
+    position_setpoint = new_position;
+    return 0;
+}
+
 
 
 int init_motor() {
-
-    update_pid_params();
+    
+    ESP_ERROR_CHECK(set_velocity(50));
+    ESP_ERROR_CHECK(set_position(0));
 
     static motor_control_context_t motor_ctrl_ctx = {
-        .pcnt_encoder = NULL,
-        .setpoint = 0,
+        .pcnt_encoder = NULL,        
     };
 
     ESP_LOGI(TAG, "Create DC motor");
@@ -208,9 +194,9 @@ int init_motor() {
 
     ESP_LOGI(TAG, "Init pcnt driver to decode rotary signal");
     pcnt_unit_config_t unit_config = {
-        .high_limit = 100000,
-        .low_limit = -100000,
-        .flags.accum_count = true, // enable counter accumulation
+        .high_limit = 10000,
+        .low_limit = -10000,
+        //.flags.accum_count = true, // enable counter accumulation
     };
     pcnt_unit_handle_t pcnt_unit = NULL;
     ESP_ERROR_CHECK(pcnt_new_unit(&unit_config, &pcnt_unit));
@@ -246,58 +232,35 @@ int init_motor() {
     motor_ctrl_ctx.pcnt_encoder = pcnt_unit;
 
     ESP_LOGI(TAG, "Create PID control blocks");
-        
-    pid_ctrl_config_t pid_velocity_config = {
-        .init_param = pid_current_params[velocity],
-    };
-    
-    pid_ctrl_config_t pid_position_config = {
-        .init_param = pid_current_params[position],
-    };
 
-    ESP_ERROR_CHECK(pid_new_control_block(&pid_velocity_config, &pid_ctrls[velocity]));
-    motor_ctrl_ctx.pid_velocity = pid_ctrls[velocity];
 
-    
+    pid_ctrl_config_t pid_configs[pid_control_count];
+    for(int x= 0; x< pid_control_count; x++) {
+        pid_configs[x].init_param = pid_params[x];    
 
-    ESP_ERROR_CHECK(pid_new_control_block(&pid_position_config, &pid_ctrls[position]));
-    motor_ctrl_ctx.pid_position = pid_ctrls[position];
+        ESP_ERROR_CHECK(pid_new_control_block(&pid_configs[x], &pid_ctrls[x]));
+        motor_ctrl_ctx.pid_controls[x] = pid_ctrls[x];
+    }    
 
-    ESP_LOGI(TAG, "timer to do PID velocity");
-    const esp_timer_create_args_t periodic_timer_velocity_args = {
-        .callback = pid_velocity_loop_cb,
-        .arg = &motor_ctrl_ctx,
-        .name = "pid_velocity_loop"
-    };
+    update_pid_params();
 
     ESP_LOGI(TAG, "timer to do PID position");
-    const esp_timer_create_args_t periodic_timer_position_args = {
-        .callback = pid_positon_loop_cb,
+    const esp_timer_create_args_t periodic_timer_args = {
+        .callback = pid_loop_cb,
         .arg = &motor_ctrl_ctx,
         .name = "pid_position_loop"
     };
-    esp_timer_handle_t pid_loop_velocity_timer = NULL;
-    esp_timer_handle_t pid_loop_position_timer = NULL;
-    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_position_args, &pid_loop_position_timer));
-    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_velocity_args, &pid_loop_velocity_timer));
+    esp_timer_handle_t pid_loop_timer = NULL;
+    
+    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &pid_loop_timer));    
 
     ESP_LOGI(TAG, "Enable motor");
     ESP_ERROR_CHECK(bdc_motor_enable(motor));
     ESP_LOGI(TAG, "Forward motor");
-    ESP_ERROR_CHECK(bdc_motor_forward(motor));
+    ESP_ERROR_CHECK(bdc_motor_forward(motor));        
 
     ESP_LOGI(TAG, "Start pid control loops");
-    ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_velocity_timer, BDC_PID_LOOP_VELOCITY_PERIOD_MS * 1000));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_position_timer, BDC_PID_LOOP_VELOCITY_PERIOD_MS * 10 * 1000));
-
-    const esp_timer_create_args_t runprogram = {
-        .callback = program_cb,
-        .arg = &motor_ctrl_ctx,
-        .name = "program"
-    };
-    esp_timer_handle_t program_timer = NULL;
-    ESP_ERROR_CHECK(esp_timer_create(&runprogram, &program_timer));
-    //ESP_ERROR_CHECK(esp_timer_start_periodic(program_timer, 1000 * 1000 * 60));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_timer, 100));    
     
     return 0;
 }
