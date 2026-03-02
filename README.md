@@ -28,7 +28,7 @@
 
 ## PID calculations
 script:
-``
+```
 load("motor_data_c.mat")
 
 data_obj = iddata(motor_c(:,2), motor_c(:,1), 0.001);
@@ -42,7 +42,7 @@ compare(h, data_obj)
 s = tf('s');
 
 hd = c2d(h, 0.001);
-``
+```
 
 ![transfer function estimation](assets/simulation_motor_response_2.png "tf estimation")
 ![schematic](assets/simulink_schematic.png "simulink")
