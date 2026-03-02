@@ -7,8 +7,8 @@ int update_pid_params();
 
 
 enum pid_controls {    
-    velocity,
-    position,
+    pid_velocity,
+    pid_position,
     pid_control_count,
 };
 
