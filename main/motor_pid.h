@@ -1,7 +1,7 @@
 #ifndef motor_pid_
 #define motor_pid_
 
-int init_motor();
+void init_motor(void *arg);
 int update_pid_params();
 
 

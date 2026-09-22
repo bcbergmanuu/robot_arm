@@ -28,5 +28,5 @@ direct_dependencies:
 - espressif/pid_ctrl
 - idf
 manifest_hash: 067e11bec02ddfe949f1d86a566335d25b3358bd38664c14c9649d74b199f829
-target: esp32
+target: esp32s3
 version: 3.0.0

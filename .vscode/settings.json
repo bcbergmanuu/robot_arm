@@ -19,5 +19,19 @@
       "inheritDefault": "hidden"
     }
   },
-  "idf.currentSetup": "/home/bergm006/.espressif/v6.1/esp-idf"
+  "idf.currentSetup": "/home/bergm006/.espressif/v6.1/esp-idf",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32s3"
+  },
+  "idf.openOcdConfigs": [
+    "board/esp32s3-builtin.cfg"
+  ],
+  "clangd.path": "/home/bergm006/.espressif/tools/esp-clangd/esp-21.1.3_20260408/esp-clangd/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/bergm006/esp32projects/robot-arm-esp61/build"
+  ],
+  "idf.flashType": "UART",
+  "idf.port": "/dev/ttyACM0"
 }

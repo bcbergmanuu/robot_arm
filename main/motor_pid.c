@@ -12,26 +12,23 @@
 #include "pid_ctrl.h"
 #include "driver/pulse_cnt.h"
 
-#include "storage.h"
 #include "motor_pid.h"
-#include "storage.h"
 
-
+#include "esp_adc/adc_continuous.h"
 
 #define BDC_MCPWM_TIMER_RESOLUTION_HZ 10000000 // 10MHz, 1 tick = 0.1us
 #define BDC_MCPWM_FREQ_HZ             25000    // 25KHz PWM
 #define BDC_MCPWM_DUTY_TICK_MAX       (BDC_MCPWM_TIMER_RESOLUTION_HZ / BDC_MCPWM_FREQ_HZ) // maximum value we can set for the duty cycle, in ticks
 #define BDC_MCPWM_GPIO_A              7
-#define BDC_MCPWM_GPIO_B              44
+#define BDC_MCPWM_GPIO_B              8
 
-#define BDC_ENCODER_GPIO_A            9
-#define BDC_ENCODER_GPIO_B            8
+#define BDC_ENCODER_GPIO_A            1
+#define BDC_ENCODER_GPIO_B            9
 
 #define ts_inner 0.001
 #define ts_outer 0.005
 #define loop_frequency ((int) (1) / (ts_inner))
-#define innerouter_ratio ((int) (ts_outer)/(ts_outer))
-#define MEASURE_STATE true
+#define innerouter_ratio ((int) (ts_outer)/(ts_inner))
 
 static const char *TAG = "motor_pid";
 
@@ -47,12 +44,29 @@ typedef struct {
 } motor_control_context_t;
 
 
+
+
+// void read_current() {
+// // Using the read and parse function
+//     adc_continuous_data_t parsed_data[64];  // User specifies maximum number of samples
+//     uint32_t num_samples = 0;
+
+//     esp_err_t ret = adc_continuous_read_parse(handle, parsed_data, 64, &num_samples, 1000);
+//     if (ret == ESP_OK) {
+//         for (int i = 0; i < num_samples; i++) {
+//             if (parsed_data[i].valid) {
+//                 ESP_LOGI(TAG, "ADC%d, Channel: %d, Value: %"PRIu32,
+//                         parsed_data[i].unit + 1,
+//                         parsed_data[i].channel,
+//                         parsed_data[i].raw_data);
+//             }
+//         }
+//     }
+// }
+
 void printer(motor_control_context_t *ctx) {
-
-    ESP_LOGI(TAG, "pos_meas: %d, vel_meas: %d, velocity_target: %f, position target: %f, pwm_speed: %f", ctx->position_measured, ctx->velocity_measured, ctx->velocity_target, ctx->position_target, ctx->pwm_speedvalue);
+    ESP_LOGI(TAG, "pos_meas: %-7d    vel_meas: %-7d    vel_tar: %-8.2f    pos_tar: %-8.2f    pwm_speed: %-8.2f", ctx->position_measured, ctx->velocity_measured, ctx->velocity_target, ctx->position_target, ctx->pwm_speedvalue);
 }
-
-#ifdef MEASURE_STATE
 
 #define storage_space 600
 static int velocity_array[storage_space] = {0};
@@ -93,7 +107,8 @@ static void motor_measure(motor_control_context_t *ctx) {
 
     datapos++;    
 }
-#endif
+
+static int print_counter = 0;
 
 static void pid_loop_cb(void *args)
 {        
@@ -110,18 +125,12 @@ static void pid_loop_cb(void *args)
     ctx->position_measured += cur_pulse_count;
     ctx->velocity_measured = cur_pulse_count*1000;    
     //encoder
-   
-             
+                
     bdc_motor_handle_t motor = ctx->motor;
-
-#ifdef MEASURE_STATE
-    motor_measure(args);
-    return; 
-#endif
-            
+                
     pid_compute(ctx->pid_controls[pid_velocity], -((float)ctx->velocity_measured) + ctx->velocity_target, &ctx->pwm_speedvalue); 
         
-    if(ctx->pwm_speedvalue < 0) {
+    if(ctx->pwm_speedvalue > 0) {
         bdc_motor_forward(motor);                
     } else {
         bdc_motor_reverse(motor);
@@ -131,9 +140,9 @@ static void pid_loop_cb(void *args)
 
     if(outer_loop_cnt >= innerouter_ratio -1) {
         outer_loop_cnt = 0;
-        pid_compute(ctx->pid_controls[pid_position], -((float)ctx->position_measured) + ctx->position_target, &ctx->velocity_target);
-        
+        pid_compute(ctx->pid_controls[pid_position], -((float)ctx->position_measured) + ctx->position_target, &ctx->velocity_target);            
     }
+         
     if(display_cnt > 500) {
         display_cnt = 0;
         printer(ctx);        
@@ -161,16 +170,16 @@ pid_ctrl_parameter_t pid_params[pid_control_count] = {
     }
 };
 
-void inform_paramUpdate(enum pid_controls x) {
-    ESP_LOGI(TAG, "wrote values to controller %s: P:%f I:%f D:%f", nvs_pid_keys[x], pid_params[x].kp, pid_params[x].ki, pid_params[x].kd);
-}
+// void inform_paramUpdate(enum pid_controls x) {
+//     ESP_LOGI(TAG, "wrote values to controller %s: P:%f I:%f D:%f", nvs_pid_keys[x], pid_params[x].kp, pid_params[x].ki, pid_params[x].kd);
+// }
 
 int update_pid_params() {
     int err = 0;
     //nvs get initial pid_values    
     
-    uint64_t readvalues[pid_control_count];
-    err = read_nvs(readvalues, nvs_pid_keys, pid_control_count);    
+    //uint64_t readvalues[pid_control_count];
+    // err = read_nvs(readvalues, nvs_pid_keys, pid_control_count);    
     //pid_vel", "pid_pos"
             
     //for(int x = 0; x< pid_control_count; x++) {
@@ -181,7 +190,7 @@ int update_pid_params() {
     pid_params[pid_velocity].ki = 1.23197084778611*ts_inner; //(float)store.ki/1000;
     pid_params[pid_velocity].kd = 0; //(float)store.kd/1000;
     
-    inform_paramUpdate(pid_velocity);
+    //inform_paramUpdate(pid_velocity);
     err |= pid_update_parameters(pid_ctrls[pid_velocity], &pid_params[pid_velocity]);
 
     
@@ -189,7 +198,7 @@ int update_pid_params() {
     pid_params[pid_position].ki = 0.00614763518537804*ts_outer;//(float)store.ki/1000;
     pid_params[pid_position].kd = 0;//(float)store.kd/1000;
 
-    inform_paramUpdate(pid_position);
+    //inform_paramUpdate(pid_position);
     err |= pid_update_parameters(pid_ctrls[pid_position], &pid_params[pid_position]);
         
     //}
@@ -206,7 +215,7 @@ void setMotorVelocity(int velocity) {
     pid_params[pid_position].min_output = -velocity;
 }
 
-int init_motor() {
+void init_motor(void *arg) {
     static motor_control_context_t motor_ctrl_ctx = {
         .pcnt_encoder = NULL,               
         .position_measured = 0,
@@ -298,49 +307,38 @@ int init_motor() {
     ESP_ERROR_CHECK(bdc_motor_forward(motor));        
 
     ESP_LOGI(TAG, "Start pid control loops");
+
+    ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_timer, 1000));   
     
-#ifdef MEASURE_STATE  
-    memset(velocity_array, 0, sizeof(velocity_array));
-    datapos = 0;        
-    
-    ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_timer, 1000));   //wait to execute 400 times 
-#endif
     
     while(1) {
-#ifdef MEASURE_STATE
+// #ifdef MEASURE_STATE
         
-        vTaskDelay(1000/portTICK_PERIOD_MS);
-        esp_timer_stop(pid_loop_timer);
-        vTaskDelay(100/portTICK_PERIOD_MS);        
-        for(int x = 0; x< storage_space; x++) {
-                printf("%d %d\n",setpoint_speed_array[x], velocity_array[x]);
-        }     
+//         vTaskDelay(1000/portTICK_PERIOD_MS);
+//         esp_timer_stop(pid_loop_timer);
+//         vTaskDelay(100/portTICK_PERIOD_MS);        
+//         for(int x = 0; x< storage_space; x++) {
+//                 printf("%d %d\n",setpoint_speed_array[x], velocity_array[x]);
+//         }     
 
-        printf("\nprint finished, rows: %d\n", storage_space);
-        vTaskDelay(portMAX_DELAY);        
-#endif
-
+//         printf("\nprint finished, rows: %d\n", storage_space);
+//         vTaskDelay(portMAX_DELAY);        
+// #endif
+        ESP_LOGI(TAG, "init move loop");
         for(int x = 0; x < 4; x++){
             motor_ctrl_ctx.position_target = 0;                
             vTaskDelay(4000/portTICK_PERIOD_MS);                
-            
-                    
-            
-            
+                            
             motor_ctrl_ctx.position_target = 10000;                  
-            //ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_timer, 1000));   //wait to execute 400 times 
             
             vTaskDelay(4000/portTICK_PERIOD_MS);
              
             setMotorVelocity((x + 1) * 5000);
-            update_pid_params();
+            update_pid_params();   
         }
-
-        
     }
 
     
     
-    
-    return 0;
+
 }
