@@ -8,9 +8,6 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
-#include "bdc_motor.h"
-#include "pid_ctrl.h"
-#include "driver/pulse_cnt.h"
 
 #include "motor_pid.h"
 
@@ -32,16 +29,7 @@
 
 static const char *TAG = "motor_pid";
 
-typedef struct {
-    bdc_motor_handle_t motor;
-    pcnt_unit_handle_t pcnt_encoder;
-    pid_ctrl_block_handle_t pid_controls[pid_control_count];  
-    
-    int position_measured, velocity_measured;
 
-    float position_target, velocity_target, pwm_speedvalue;            
-    
-} motor_control_context_t;
 
 
 
@@ -64,110 +52,82 @@ typedef struct {
 //     }
 // }
 
+
+
 void printer(motor_control_context_t *ctx) {
-    ESP_LOGI(TAG, "pos_meas: %-7d    vel_meas: %-7d    vel_tar: %-8.2f    pos_tar: %-8.2f    pwm_speed: %-8.2f", ctx->position_measured, ctx->velocity_measured, ctx->velocity_target, ctx->position_target, ctx->pwm_speedvalue);
+    ESP_LOGI(TAG, "pos_meas: %-4d vel_meas: %-4d vel_tar: %-4.2f pos_tar: %-4.2f pwm_speed: %-4.2f, torque_tar: %-4.2f, torque_meas: %-8.2f", 
+        ctx->position_measured, ctx->velocity_measured, ctx->velocity_target, ctx->position_target, ctx->pwm_speedvalue, ctx->target_torque, ctx->torque_measured);
 }
 
-#define storage_space 600
-static int velocity_array[storage_space] = {0};
-static int setpoint_speed_array[storage_space] = {0};
+//#define storage_space 600
+// static int velocity_array[storage_space] = {0};
+// static int setpoint_speed_array[storage_space] = {0};
 
-static int datapos = 0;
+// static int datapos = 0;
 
-static void motor_measure(motor_control_context_t *ctx) {
+// static void motor_measure(motor_control_context_t *ctx) {
    
-    switch (datapos)
-    {
-        case 0:
-            ctx->velocity_target = 0;
-            break;
-        case 200:
-            ctx->velocity_target = 400;
-            break;
-        case 500:
-            ctx->velocity_target = 0;
-            break;
-        case 550:
-            ctx->velocity_target = 400;
-            break;       
-        case 600:
-            ctx->velocity_target = 0;
-            break;
-        default:
-            break;
-    }
+//     switch (datapos)
+//     {
+//         case 0:
+//             ctx->velocity_target = 0;
+//             break;
+//         case 200:
+//             ctx->velocity_target = 400;
+//             break;
+//         case 500:
+//             ctx->velocity_target = 0;
+//             break;
+//         case 550:
+//             ctx->velocity_target = 400;
+//             break;       
+//         case 600:
+//             ctx->velocity_target = 0;
+//             break;
+//         default:
+//             break;
+//     }
     
 
-    bdc_motor_set_speed(ctx->motor, (uint32_t)abs((int)ctx->velocity_target));
+//     bdc_motor_set_speed(ctx->motor, (uint32_t)abs((int)ctx->velocity_target));
      
-    if(datapos < storage_space) {
-        velocity_array[datapos] = -ctx->velocity_measured;
-        setpoint_speed_array[datapos] = ctx->velocity_target;
-    }
+//     if(datapos < storage_space) {
+//         velocity_array[datapos] = -ctx->velocity_measured;
+//         setpoint_speed_array[datapos] = ctx->velocity_target;
+//     }
 
-    datapos++;    
-}
-
-static int print_counter = 0;
-
-static void pid_loop_cb(void *args)
-{        
-    motor_control_context_t *ctx = (motor_control_context_t *)args;    
-    
-    static int outer_loop_cnt = 0, display_cnt = 0;
-
-    
-
-    //encoder
-    int cur_pulse_count = 0;
-    pcnt_unit_get_count(ctx->pcnt_encoder, &cur_pulse_count);
-    pcnt_unit_clear_count(ctx->pcnt_encoder);
-    ctx->position_measured += cur_pulse_count;
-    ctx->velocity_measured = cur_pulse_count*1000;    
-    //encoder
-                
-    bdc_motor_handle_t motor = ctx->motor;
-                
-    pid_compute(ctx->pid_controls[pid_velocity], -((float)ctx->velocity_measured) + ctx->velocity_target, &ctx->pwm_speedvalue); 
-        
-    if(ctx->pwm_speedvalue > 0) {
-        bdc_motor_forward(motor);                
-    } else {
-        bdc_motor_reverse(motor);
-    }
-
-    bdc_motor_set_speed(motor, (uint32_t)abs((int)ctx->pwm_speedvalue));
-
-    if(outer_loop_cnt >= innerouter_ratio -1) {
-        outer_loop_cnt = 0;
-        pid_compute(ctx->pid_controls[pid_position], -((float)ctx->position_measured) + ctx->position_target, &ctx->velocity_target);            
-    }
-         
-    if(display_cnt > 500) {
-        display_cnt = 0;
-        printer(ctx);        
-    }
-    outer_loop_cnt++; 
-    display_cnt++;
-}
+//     datapos++;    
+// }
 
 pid_ctrl_block_handle_t pid_ctrls[pid_control_count];
 
 pid_ctrl_parameter_t pid_params[pid_control_count] = { 
-    //velocity
-    {
-        .cal_type = PID_CAL_TYPE_POSITIONAL,        
-        .max_output   = BDC_MCPWM_DUTY_TICK_MAX - 1,
-        .min_output   = -BDC_MCPWM_DUTY_TICK_MAX,
-    },
-    //position
+    
+    //torque, this outputs into pwm
     {        
         .cal_type = PID_CAL_TYPE_POSITIONAL,        
         .max_integral = 1000,
         .min_integral = -1000,
-        .max_output = 20000,  //adjustable for speed
-        .min_output = -20000,
-    }
+        .max_output   = BDC_MCPWM_DUTY_TICK_MAX - 1, 
+        .min_output   = -BDC_MCPWM_DUTY_TICK_MAX, 
+        
+    },
+    //velocity
+      
+    {
+        .cal_type = PID_CAL_TYPE_POSITIONAL,        
+        .max_output = 3000,  //this outputs into torque request
+        .min_output = -3000, //this outputs into torque request
+        
+    },
+    //position
+    {  
+        .cal_type = PID_CAL_TYPE_POSITIONAL,
+        .max_integral = 1000,
+        .min_integral = -1000,        
+        .max_output = 2000, //this outputs into max velocity
+        .min_output = -2000 //this outputs into max velocity
+    },
 };
 
 // void inform_paramUpdate(enum pid_controls x) {
@@ -199,8 +159,16 @@ int update_pid_params() {
     pid_params[pid_position].kd = 0;//(float)store.kd/1000;
 
     //inform_paramUpdate(pid_position);
-    err |= pid_update_parameters(pid_ctrls[pid_position], &pid_params[pid_position]);
+    err |= pid_update_parameters(pid_ctrls[pid_position], &pid_params[pid_position]);        
+
         
+    pid_params[pid_torque].kp = 100;//(float)store.kp/1000;
+    pid_params[pid_torque].ki = 0*ts_outer;//(float)store.ki/1000;
+    pid_params[pid_torque].kd = 0;//(float)store.kd/1000;
+
+    //inform_paramUpdate(pid_position);
+    err |= pid_update_parameters(pid_ctrls[pid_torque], &pid_params[pid_torque]);
+
     //}
 
     if(err != ESP_OK) {        
@@ -213,6 +181,18 @@ int update_pid_params() {
 void setMotorVelocity(int velocity) {
     pid_params[pid_position].max_output = velocity;
     pid_params[pid_position].min_output = -velocity;
+}
+
+static controls motion_paramters;
+
+void set_controls(controls c) {
+      motion_paramters.current = c.current;
+      motion_paramters.position = c.position;
+}
+
+static float last_adc;
+void updateAdcValue(float value) {
+    last_adc = value;
 }
 
 void init_motor(void *arg) {
@@ -289,17 +269,8 @@ void init_motor(void *arg) {
         motor_ctrl_ctx.pid_controls[x] = pid_ctrls[x];
     }    
 
-    update_pid_params();
-
-    ESP_LOGI(TAG, "timer to do PID position");
-    const esp_timer_create_args_t periodic_timer_args = {
-        .callback = pid_loop_cb,
-        .arg = &motor_ctrl_ctx,
-        .name = "pid_position_loop"
-    };
-    esp_timer_handle_t pid_loop_timer = NULL;
+    update_pid_params();          
     
-    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &pid_loop_timer));    
 
     ESP_LOGI(TAG, "Enable motor");
     ESP_ERROR_CHECK(bdc_motor_enable(motor));
@@ -308,10 +279,8 @@ void init_motor(void *arg) {
 
     ESP_LOGI(TAG, "Start pid control loops");
 
-    ESP_ERROR_CHECK(esp_timer_start_periodic(pid_loop_timer, 1000));   
-    
-    
-    while(1) {
+           
+    //while(1) {
 // #ifdef MEASURE_STATE
         
 //         vTaskDelay(1000/portTICK_PERIOD_MS);
@@ -324,21 +293,66 @@ void init_motor(void *arg) {
 //         printf("\nprint finished, rows: %d\n", storage_space);
 //         vTaskDelay(portMAX_DELAY);        
 // #endif
-        ESP_LOGI(TAG, "init move loop");
-        for(int x = 0; x < 4; x++){
-            motor_ctrl_ctx.position_target = 0;                
-            vTaskDelay(4000/portTICK_PERIOD_MS);                
-                            
-            motor_ctrl_ctx.position_target = 10000;                  
-            
-            vTaskDelay(4000/portTICK_PERIOD_MS);
-             
-            setMotorVelocity((x + 1) * 5000);
-            update_pid_params();   
-        }
-    }
+        
 
-    
-    
+
+
+        
+        // ESP_LOGI(TAG, "init move loop");
+        // for(int x = 0; x < 4; x++){
+        //     motor_ctrl_ctx.position_target = 0;                
+        //     vTaskDelay(4000/portTICK_PERIOD_MS);                
+                            
+        //     motor_ctrl_ctx.position_target = 10000;                  
+            
+        //     vTaskDelay(4000/portTICK_PERIOD_MS);
+             
+        //     setMotorVelocity((x + 1) * 5000);
+        //     update_pid_params();   
+        // }
+    //}
+    int cur_pulse_cntr = 0, torque_loop_cntr =0, outer_loop_cnt = 0, display_cnt = 0;                        
+
+     while(1){
+        ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);     
+        motor_ctrl_ctx.position_target = motion_paramters.position;
+        setMotorVelocity(motion_paramters.velocity);
+        motor_ctrl_ctx.torque_measured = last_adc;
+        
+        //torque
+        pid_compute(motor_ctrl_ctx.pid_controls[pid_torque], motor_ctrl_ctx.target_torque-motor_ctrl_ctx.torque_measured, &motor_ctrl_ctx.pwm_speedvalue);         
+        
+        if(torque_loop_cntr++ >= 5) {
+            //encoder            
+            pcnt_unit_get_count(motor_ctrl_ctx.pcnt_encoder, &cur_pulse_cntr);
+            pcnt_unit_clear_count(motor_ctrl_ctx.pcnt_encoder);
+            motor_ctrl_ctx.position_measured += cur_pulse_cntr;
+            motor_ctrl_ctx.velocity_measured = cur_pulse_cntr*1000;    //aanpassen!
+            //encoder
+
+            torque_loop_cntr = 0;
+            pid_compute(motor_ctrl_ctx.pid_controls[pid_velocity], -((float)motor_ctrl_ctx.velocity_measured) + motor_ctrl_ctx.velocity_target, &motor_ctrl_ctx.target_torque); 
+
+            if(outer_loop_cnt >= innerouter_ratio -1) {
+                outer_loop_cnt = 0;
+                pid_compute(motor_ctrl_ctx.pid_controls[pid_position], -((float)motor_ctrl_ctx.position_measured) + motor_ctrl_ctx.position_target, &motor_ctrl_ctx.velocity_target);                        
+            }
+        }
+
+        if(motor_ctrl_ctx.target_torque > 0) {
+            bdc_motor_forward(motor);                
+        } else {
+            bdc_motor_reverse(motor);
+        }
+
+        bdc_motor_set_speed(motor, (uint32_t)abs((int)motor_ctrl_ctx.pwm_speedvalue));
+            
+        if(display_cnt > 1000) {
+            display_cnt = 0;
+            printer(&motor_ctrl_ctx);        
+        }
+        outer_loop_cnt++; 
+        display_cnt++;   
+    }
 
 }

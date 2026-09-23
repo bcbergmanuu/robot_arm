@@ -13,6 +13,8 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_adc/adc_continuous.h"
+#include "main.h"
+#include "motor_pid.h"
 
 #define EXAMPLE_ADC_UNIT                    ADC_UNIT_1
 #define EXAMPLE_ADC_CONV_MODE               ADC_CONV_SINGLE_UNIT_1
@@ -22,7 +24,7 @@
 
 #define EXAMPLE_ADC_BIT_WIDTH               SOC_ADC_DIGI_MAX_BITWIDTH
 
-#define EXAMPLE_READ_LEN                    20
+#define EXAMPLE_READ_LEN                    40
 
 
 static adc_channel_t channel[1] = {ADC_CHANNEL_3};
@@ -35,7 +37,7 @@ static bool IRAM_ATTR s_conv_done_cb(adc_continuous_handle_t handle, const adc_c
 {
     BaseType_t mustYield = pdFALSE;
     //Notify that ADC continuous driver has done enough number of conversions
-    vTaskNotifyGiveFromISR(s_task_handle, &mustYield);
+    vTaskNotifyGiveIndexedFromISR(s_task_handle, 0, &mustYield);
 
     return (mustYield == pdTRUE);
 }
@@ -51,7 +53,7 @@ static void continuous_adc_init(adc_channel_t *channel, uint8_t channel_num, adc
     ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &handle));
 
     adc_continuous_config_t dig_cfg = {
-        .sample_freq_hz = 25000,
+        .sample_freq_hz = 50000,
         .conv_mode = EXAMPLE_ADC_CONV_MODE,
     };
 
@@ -74,7 +76,8 @@ static void continuous_adc_init(adc_channel_t *channel, uint8_t channel_num, adc
 }
 
 void adc_run(void *arg) {
-
+        
+    
     esp_err_t ret;
     uint32_t ret_num = 0;
     uint8_t result[EXAMPLE_READ_LEN] = {0};
@@ -90,8 +93,8 @@ void adc_run(void *arg) {
     };
     ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(handle, &cbs, NULL));
     ESP_ERROR_CHECK(adc_continuous_start(handle));
-    int print_counter = 0;
-   while (1) {
+    
+    while (1) {
 
         /**
          * This is to show you the way to use the ADC continuous mode driver event callback.
@@ -101,40 +104,49 @@ void adc_run(void *arg) {
          * Without using this event callback (to notify this task), you can still just call
          * `adc_continuous_read()` here in a loop, with/without a certain block timeout.
          */
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
 
         
         ret = adc_continuous_read(handle, result, EXAMPLE_READ_LEN, &ret_num, 0);
-        print_counter++;
-        if(print_counter>15000) {
-            print_counter = 0;
+        
+        
             if (ret == ESP_OK) {
-                ESP_LOGI("TASK", "ret is %x, ret_num is %"PRIu32" bytes", ret, ret_num);
+                //ESP_LOGI("TASK", "ret is %x, ret_num is %"PRIu32" bytes", ret, ret_num);
 
                 adc_continuous_data_t parsed_data[ret_num / SOC_ADC_DIGI_RESULT_BYTES];
                 uint32_t num_parsed_samples = 0;
 
                 esp_err_t parse_ret = adc_continuous_parse_data(handle, result, ret_num, parsed_data, &num_parsed_samples);
             
-                
+                float mean = 0;
+                int mean_count = 0;
                 if (parse_ret == ESP_OK) {
                     for (int i = 0; i < num_parsed_samples; i++) {
                         if (parsed_data[i].valid) {
-                            ESP_LOGI(TAG, "ADC%d, Channel: %d, Value: %"PRIu32,
-                                        parsed_data[i].unit + 1,
-                                        parsed_data[i].channel,
-                                        parsed_data[i].raw_data);
+                            // ESP_LOGI(TAG, "ADC%d, Channel: %d, Value: %"PRIu32,
+                            //             parsed_data[i].unit + 1,
+                            //             parsed_data[i].channel,
+                            //             parsed_data[i].raw_data);
+                            mean += (float)parsed_data[i].raw_data;
+                            mean_count++;
+                            
                         } else {
-                            ESP_LOGW(TAG, "Invalid data [ADC%d_Ch%d_%"PRIu32"]",
-                                        parsed_data[i].unit + 1,
-                                        parsed_data[i].channel,
-                                        parsed_data[i].raw_data);
+                            // ESP_LOGW(TAG, "Invalid data [ADC%d_Ch%d_%"PRIu32"]",
+                            //             parsed_data[i].unit + 1,
+                            //             parsed_data[i].channel,
+                            //             parsed_data[i].raw_data);
                         }
+                    }
+                    if(mean_count > 0) {
+                        mean = mean/mean_count;
+                        updateAdcValue(mean);
+                        xTaskNotifyGiveIndexed( taskHandle_pid, 1 );
                     }
                 } else {
                     ESP_LOGE(TAG, "Data parsing failed: %s", esp_err_to_name(parse_ret));
                 }
                 
+        
 
                 /**
                  * Because printing is slow, so every time you call `ulTaskNotifyTake`, it will immediately return.
@@ -146,7 +158,7 @@ void adc_run(void *arg) {
             //     //We try to read `EXAMPLE_READ_LEN` until API returns timeout, which means there's no available data
             //     break;
             }
-        }
+        
         
     }
 
