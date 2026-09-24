@@ -33,6 +33,9 @@ typedef struct
     int position;
     float velocity;
     float current;
+
+    //debug, remove after
+    int pwmspeed;
 } controls;
 
 void set_controls(controls c);

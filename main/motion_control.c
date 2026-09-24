@@ -18,6 +18,10 @@ static const char *TAG = "motion_control";
 
 controls motor_c;
 
+
+
+
+
 void start_motor(void *arg) {
 
     while(1) {
