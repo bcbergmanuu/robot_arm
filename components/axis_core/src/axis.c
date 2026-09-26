@@ -38,12 +38,16 @@ static void check_safety(axis_t *a, const axis_inputs_t *in) {
     }
 }
 
-static void set_sp_kind_bumpless(axis_t *a, uint8_t kind) {
-    a->sp_kind = kind;
+static void reset_trajectory(axis_t *a) {
     a->sp_pos = (float)a->pos;
     a->sp_vel = a->vel;
     pidc_reset(&a->pos_pid);
     pidc_reset(&a->vel_pid);
+}
+
+static void set_sp_kind_bumpless(axis_t *a, uint8_t kind) {
+    a->sp_kind = kind;
+    reset_trajectory(a);
 }
 
 static void handle_command(axis_t *a, uint8_t cmd) {
@@ -64,10 +68,7 @@ static void handle_command(axis_t *a, uint8_t cmd) {
                 a->homed = false;
                 a->home_ms = 0;
                 a->stall_ms = 0;
-                a->sp_pos = (float)a->pos;
-                a->sp_vel = a->vel;
-                pidc_reset(&a->pos_pid);
-                pidc_reset(&a->vel_pid);
+                reset_trajectory(a);
             }
             break;
         case PROTO_CMD_CLEAR_FAULT:
