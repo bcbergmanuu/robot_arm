@@ -83,3 +83,12 @@ motor, encoder and supply. Feed that CSV (same columns: `time_us,position,veloci
 to `robotarm stepfit <csv> --motor <name> --supply <V> --cpr <4 × lines>` to refit `J`, `b`,
 `T_c` per axis, and replace the `(assumed)` friction values in `config/arm.yaml` with the
 results referred to the joint (`× gear_ratio` for torques, `× gear_ratio²` for `J` and `b`).
+
+## Gain tuning in simulation
+
+`uv run robotarm tune --axis NAME [--velocity]` homes the simulated arm (lockstep, deterministic)
+and prints overshoot, settle time and steady error for a 20° position step (or a velocity step)
+on one axis; the procedure and the tuned values are in `pc/robotarm/sim/tune.py` and
+`config/arm.yaml`. The reported homing offset (0.1–0.4° per axis) is expected: the axis registers
+its home while pressed into MuJoCo's slightly compliant joint limit (default `solref`), so its
+zero sits off by that penetration depth — deterministic, and well inside the 1° homing tolerance.

@@ -45,6 +45,19 @@ static void reset_trajectory(axis_t *a) {
     pidc_reset(&a->vel_pid);
 }
 
+/* First tick after power-up: the encoder may already be far from 0, so start the
+ * velocity window full of the current position (vel = 0) instead of zeros, and
+ * resync any trajectory a command (ENABLE/HOME/setpoint) started before pos was
+ * known -- otherwise the stale sp_pos = 0 trips a false FOLLOWING fault. */
+static void prime_from_first_reading(axis_t *a) {
+    for (uint8_t i = 0; i < AXIS_VEL_WINDOW; i++) a->pos_hist[i] = a->pos;
+    a->hist_idx = 0;
+    a->hist_fill = AXIS_VEL_WINDOW;
+    a->vel = 0.0f;
+    a->primed = true;
+    if (a->state == AXIS_READY || a->state == AXIS_HOMING) reset_trajectory(a);
+}
+
 static void set_sp_kind_bumpless(axis_t *a, uint8_t kind) {
     a->sp_kind = kind;
     reset_trajectory(a);
@@ -232,6 +245,7 @@ void axis_tick(axis_t *a, const axis_inputs_t *in, axis_outputs_t *out) {
 
     int32_t raw = in->encoder_raw * a->cfg->encoder_sign;
     a->pos = raw - a->zero_offset;
+    if (!a->primed) prime_from_first_reading(a);
     update_velocity_estimate(a);
 
     check_safety(a, in);

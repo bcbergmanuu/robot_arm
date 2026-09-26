@@ -97,6 +97,32 @@ static void test_mode_switch_is_bumpless(void) {
     TT_CHECK(r.a.state == AXIS_READY);
 }
 
+/* Start-up regression (R14): the encoder is already far from 0 at power-up and a
+ * command arrives before the first tick. The core must not see a velocity spike or
+ * a stale sp_pos (false FOLLOWING fault). */
+static void test_enable_before_first_tick_at_large_encoder_count(void) {
+    rig_t r; rig_init(&r, &TEST_CFG);
+    r.p.pos = 15000.0;                                      /* 5x max_following_error away from 0 */
+    cmd(&r, PROTO_CMD_ENABLE);                              /* before any axis_tick */
+    run_ms(&r, 1);
+    TT_NEAR(r.a.vel, 0.0f, 1.0f);                           /* no start-up velocity spike */
+    run_ms(&r, 99);
+    TT_CHECK(r.a.state == AXIS_READY);
+    TT_CHECK(r.a.faults == 0);
+    TT_CHECK(fabsf(r.a.duty) < 0.02f);
+    TT_NEAR(r.a.pos, 15000, 5);
+}
+
+static void test_home_before_first_tick_at_large_encoder_count(void) {
+    rig_t r; rig_init(&r, &TEST_CFG);
+    r.p.pos = 15000.0;
+    cmd(&r, PROTO_CMD_HOME);
+    run_ms(&r, 1);
+    TT_NEAR(r.a.vel, 0.0f, 1.0f);
+    TT_CHECK(r.a.state == AXIS_HOMING);
+    TT_CHECK(fabsf(r.a.duty) <= TEST_CFG.vel_ff * TEST_CFG.home_vel + 0.01f); /* no kick from a bogus velocity */
+}
+
 int main(void) {
     TT_RUN(test_velocity_mode_tracks_target);
     TT_RUN(test_velocity_clamped_to_max);
@@ -107,5 +133,7 @@ int main(void) {
     TT_RUN(test_following_error_fault_when_stalled);
     TT_RUN(test_duty_stays_clamped_while_stalled);
     TT_RUN(test_mode_switch_is_bumpless);
+    TT_RUN(test_enable_before_first_tick_at_large_encoder_count);
+    TT_RUN(test_home_before_first_tick_at_large_encoder_count);
     return TT_DONE();
 }

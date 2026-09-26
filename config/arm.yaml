@@ -90,7 +90,7 @@ axes:
     name: wrist_bend
     joint: j4
     encoder_cpr: 128              # (assumed: not documented in README)
-    gear_ratio: 100.0             # (assumed)
+    gear_ratio: 200.0             # (assumed)
     motor: faulhaber_2224sr_12v   # (assumed)
     motor_sign: 1
     encoder_sign: 1
@@ -102,7 +102,7 @@ axes:
     home: {direction: 1, velocity_deg_s: 15, current_ma: 600, timeout_s: 30}
     link_mass_kg: 0.4
     friction: {coulomb_nm: 0.2, viscous_nm_s: 0.1}
-    gains: {vel_kp: 1.2e-4, vel_ki: 4.0e-3}
+    gains: {vel_kp: 5.5e-5, vel_ki: 1.8e-3}
   - node: 5
     name: wrist_rotate
     joint: j5

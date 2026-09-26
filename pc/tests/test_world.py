@@ -84,6 +84,18 @@ def test_axes_fault_when_heartbeats_stop(cfg):
     assert st.state == p.AxisState.FAULT and p.Fault.WATCHDOG in st.faults
 
 
+def test_enable_at_power_up_far_from_zero_stays_ready(cfg):
+    # Encoders read ~30 deg (>> max_following_error) at the very first tick and ENABLE
+    # arrives before it: the axes must resync instead of tripping FOLLOWING.
+    world = SimWorld(cfg, initial_q={a.joint: math.radians(30) for a in cfg.axes})
+    bus = SimBus(world)
+    bus.send(p.encode_command(p.NODE_BROADCAST, p.Command.ENABLE))
+    run_lockstep(world, bus, 0.2, on_ms=heartbeat(bus))
+    statuses = latest_statuses(bus)
+    for node in range(1, 7):
+        assert statuses[node].state == p.AxisState.READY and statuses[node].faults == 0, node
+
+
 def test_outgoing_frames_carry_sim_time(cfg):
     world = SimWorld(cfg)
     bus = SimBus(world)

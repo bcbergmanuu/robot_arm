@@ -39,6 +39,7 @@ typedef struct {
     axis_state_t state;
     uint8_t faults;
     bool homed;
+    bool primed;         /* false until the first axis_tick has read the encoder */
     int32_t zero_offset; /* raw (sign-corrected) count that corresponds to position 0 */
     int32_t pos;         /* counts relative to home zero */
     float vel;           /* counts/s, estimated */
