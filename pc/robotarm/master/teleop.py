@@ -4,16 +4,20 @@
 by tests in lockstep with the simulator); `run_teleop` is the body of the
 `robotarm teleop` CLI. Safety rules (see docs/teleop.md):
 
-- Button *edges* act: `estop` (works even when not armed; also disarms),
-  `enable`, `clear_faults`, `home`, `toggle_mode` (only when not armed).
-  A button held at start-up or through a gamepad reconnect is not an edge
-  until it has been released.
+- `estop` is level-triggered and never latched: while it is held (pad
+  connected) E-STOP is sent every update, armed or not, and it disarms.
+- The other buttons act on *edges*: `clear_faults`; `enable`, `home` and
+  `toggle_mode` only when not armed. A button held at start-up or through a
+  gamepad reconnect is not an edge until it has been released.
 - `armed` goes true only on a rising edge of the deadman while the pad is
   connected; releasing the deadman or losing the pad disarms, and after a
   loss the deadman must be released and pressed again.
 - Armed + JOINT ("jogging"): every mapped joint gets a velocity setpoint every
   update; the slow button scales every jog input (R22).
 - Armed + CARTESIAN: not implemented yet (Task 17) -- behaves as not armed.
+- The CLI loop calls `ArmClient.keepalive()` every iteration and builds its
+  client with `keepalive_timeout` (R23): if the loop stalls, HEARTBEATs stop
+  and the axes watchdog-fault instead of running on the last jog velocity.
 - When jogging stops (deadman released, pad lost, E-STOP) and when the pad is
   lost, zero velocity goes to every jog axis for the next
   _STOP_REPEAT_UPDATES updates (repeated for robustness); otherwise, while not
@@ -50,6 +54,7 @@ DEFAULT_TELEOP_CONFIG_RELATIVE_PATH = "config/teleop.yaml"
 _DPAD_FRACTION = 0.5  # a d-pad pair jogs at +/- this fraction of the joint's max velocity
 _ANALOG_INPUTS = frozenset({"lx", "ly", "rx", "ry", "l2", "r2"})  # float fields of GamepadState
 _STATUS_PERIOD_S = 0.1  # CLI status line refresh (10 Hz)
+_KEEPALIVE_TIMEOUT_S = 0.1  # R23: HEARTBEATs stop this long after the loop's last iteration
 _STOP_REPEAT_UPDATES = 3  # zero-velocity updates sent after jogging stops or the pad is lost (R21)
 
 
@@ -111,15 +116,35 @@ def _parse_binding(joint: str, raw: dict[str, Any]) -> JointBinding:
     return JointBinding(joint=joint, sign=sign, **{kind: names})
 
 
+def _parse_speed_scale(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict) or not {"normal", "slow"} <= raw.keys():
+        raise ValueError(f"speed_scale needs 'normal' and 'slow' entries, got {raw!r}")
+    scale = {k: float(v) for k, v in raw.items()}
+    bad = {k: v for k, v in scale.items() if not v > 0.0}
+    if bad:
+        raise ValueError(f"speed_scale values must be > 0, got {bad}")
+    return scale
+
+
 def load_teleop_config(path: str | Path | None = None) -> TeleopConfig:
-    """Load config/teleop.yaml (or `path`). Raises ValueError on a malformed joint binding."""
+    """Load config/teleop.yaml (or `path`). Raises ValueError on missing keys or bad values."""
     path = Path(path) if path is not None else _default_teleop_config_path()
     with path.open() as f:
         raw = yaml.safe_load(f) or {}
+    try:
+        return _build_teleop_config(raw)
+    except KeyError as exc:
+        raise ValueError(f"{path}: missing key {exc}") from exc
+
+
+def _build_teleop_config(raw: dict[str, Any]) -> TeleopConfig:
+    loop_hz = float(raw["loop_hz"])
+    if not loop_hz > 0.0:
+        raise ValueError(f"loop_hz must be > 0, got {loop_hz}")
     return TeleopConfig(
         deadzone=float(raw["deadzone"]),
-        loop_hz=float(raw["loop_hz"]),
-        speed_scale={k: float(v) for k, v in raw["speed_scale"].items()},
+        loop_hz=loop_hz,
+        speed_scale=_parse_speed_scale(raw["speed_scale"]),
         buttons={k: str(v) for k, v in raw["buttons"].items()},
         joint_mode=tuple(_parse_binding(j, b) for j, b in (raw.get("joint_mode") or {}).items()),
         cartesian_mode={k: float(v) for k, v in (raw.get("cartesian_mode") or {}).items()},
@@ -163,24 +188,25 @@ class Teleop:
         self._prev_buttons = buttons if pad.connected else self._latched_all
 
         roles = self.cfg.buttons
-        if roles.get("estop") in edges:
+        estop_held = roles.get("estop") in buttons  # level, not edge: no latch can swallow it
+        if estop_held:
             self.client.estop()
-            self.armed = False
-        if roles.get("clear_faults") in edges:
-            self.client.clear_faults()
-        if roles.get("enable") in edges:
-            self.client.enable()
-        if roles.get("home") in edges:
-            self.client.home()
 
         deadman = roles.get("deadman")
-        if not pad.connected or deadman not in buttons:
+        if not pad.connected or deadman not in buttons or estop_held:
             self.armed = False
-        elif deadman in edges and roles.get("estop") not in edges:
+        elif deadman in edges:
             self.armed = True
 
-        if not self.armed and roles.get("toggle_mode") in edges:
-            self.mode = Mode.CARTESIAN if self.mode is Mode.JOINT else Mode.JOINT
+        if roles.get("clear_faults") in edges:
+            self.client.clear_faults()
+        if not self.armed:
+            if roles.get("enable") in edges:
+                self.client.enable()
+            if roles.get("home") in edges:
+                self.client.home()
+            if roles.get("toggle_mode") in edges:
+                self.mode = Mode.CARTESIAN if self.mode is Mode.JOINT else Mode.JOINT
 
         jogging = self.armed and self.mode is Mode.JOINT
         if (self._jogging and not jogging) or pad_lost:
@@ -242,51 +268,90 @@ def _fault_names(faults: Fault) -> str:
 def run_teleop(bus_url: str, mode: str, gamepad=None) -> int:
     """Body of `robotarm teleop`. Returns the process exit code.
 
-    0 after Ctrl-C (or SIGTERM), 2 when the bus can't be opened or is lost.
-    Either way the client is closed, which sends a DISABLE broadcast when the
-    bus still works (otherwise the axes watchdog-fault on their own).
+    0 after Ctrl-C (or SIGTERM) in the loop; 130 after Ctrl-C while the bus is
+    still opening; 2 on any failure (config, bus open, gamepad, bus lost,
+    internal error), reported as a single `error: ...` line on stderr. Once the
+    loop has started the client is always closed, which sends a DISABLE
+    broadcast when the bus still works (otherwise the axes watchdog-fault on
+    their own).
     """
-    arm_cfg = load_arm_config()
-    cfg = load_teleop_config()
-
-    stop = threading.Event()
-    old_handlers = _install_stop_handlers(stop)  # before Gamepad(): it preserves the caller's SIGINT handler
     try:
-        try:
-            bus = open_bus(bus_url)
-        except (SimNotRunningError, can.CanError, OSError, ValueError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
+        arm_cfg = load_arm_config()
+        cfg = load_teleop_config()
+    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as exc:
+        return _fail(f"config: {exc}")
+
+    try:
+        bus = open_bus(bus_url)
+    except (SimNotRunningError, can.CanError, OSError, ValueError) as exc:
+        return _fail(str(exc))
+    except KeyboardInterrupt:  # Ctrl-C during a slow open (our handler isn't installed yet)
+        return 130
+    try:
+        stop = threading.Event()
+        old_handlers = _install_stop_handlers(stop)  # before Gamepad(): it preserves the caller's SIGINT handler
         try:
             return _teleop_loop(bus, arm_cfg, cfg, Mode(mode), gamepad, stop)
         finally:
-            bus.shutdown()
+            _restore_handlers(old_handlers)
     finally:
-        _restore_handlers(old_handlers)
+        bus.shutdown()
+
+
+def _fail(message: str) -> int:
+    print(f"error: {message}", file=sys.stderr)
+    return 2
+
+
+def _runner_failure(error: BaseException | None) -> str:
+    if error is None:
+        return "bus lost: runner stopped"
+    if isinstance(error, (can.CanError, OSError)):
+        return f"bus lost: {error}"
+    return f"internal error: {error!r}"
 
 
 def _teleop_loop(bus: can.BusABC, arm_cfg: ArmConfig, cfg: TeleopConfig, mode: Mode, gamepad,
                  stop: threading.Event) -> int:
-    if gamepad is None:
-        gamepad = Gamepad(deadzone=cfg.deadzone, raw_fallback=cfg.raw_joystick_fallback)
-    client = ArmClient(bus, arm_cfg)
-    teleop = Teleop(client, arm_cfg, cfg)
+    client = ArmClient(bus, arm_cfg, keepalive_timeout=_KEEPALIVE_TIMEOUT_S)
+    try:
+        teleop = Teleop(client, arm_cfg, cfg)
+    except ValueError as exc:
+        return _fail(f"config: {exc}")
     teleop.mode = mode
+    if gamepad is None:
+        try:
+            gamepad = Gamepad(deadzone=cfg.deadzone, raw_fallback=cfg.raw_joystick_fallback)
+        except Exception as exc:  # noqa: BLE001 -- any SDL/pygame start-up failure
+            return _fail(f"gamepad: {exc}")
+
     period_s = 1.0 / cfg.loop_hz
-    bus_error: BaseException | None = None
+    failure: str | None = None
     client.start()
     try:
         next_tick = time.monotonic()
         next_status = next_tick
         while not stop.is_set():
             if not client.alive():
-                bus_error = client.error
+                failure = _runner_failure(client.error)
                 break
             now = time.monotonic()
+            # First thing each iteration (R23): anything below that stalls -- the
+            # gamepad, the bus, or a blocked stdout -- stops the HEARTBEATs within
+            # _KEEPALIVE_TIMEOUT_S, and the axes then watchdog-fault.
+            client.keepalive(now)
             try:
-                teleop.update(gamepad.poll(), now)
+                pad = gamepad.poll()
+            except Exception as exc:  # noqa: BLE001
+                failure = f"gamepad: {exc}"
+                break
+            try:
+                teleop.update(pad, now)
             except (can.CanError, OSError) as exc:
-                bus_error = exc
+                failure = f"bus lost: {exc}"
+                break
+            except Exception as exc:  # noqa: BLE001
+                failure = f"internal error: {exc!r}"
                 break
             if now >= next_status:
                 sys.stdout.write("\r" + teleop.status_line() + "\x1b[K")
@@ -298,9 +363,8 @@ def _teleop_loop(bus: can.BusABC, arm_cfg: ArmConfig, cfg: TeleopConfig, mode: M
         client.close()
         sys.stdout.write("\n")  # end the in-place status line
         sys.stdout.flush()
-    if bus_error is not None:
-        print(f"error: bus lost: {bus_error}", file=sys.stderr)
-        return 2
+    if failure is not None:
+        return _fail(failure)
     return 0
 
 

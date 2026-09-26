@@ -51,10 +51,18 @@ class ArmClient:
     `None`, so `connected()` is False.
     """
 
-    def __init__(self, bus: can.BusABC, cfg: ArmConfig, heartbeat_hz: float = 20.0) -> None:
+    def __init__(self, bus: can.BusABC, cfg: ArmConfig, heartbeat_hz: float = 20.0,
+                 keepalive_timeout: float | None = None) -> None:
+        """`keepalive_timeout` (R23): None = always send HEARTBEATs from poll(). When
+        set, poll() sends them only while keepalive(now) was called within that many
+        seconds -- so a stalled application loop stops feeding the axis watchdogs
+        even though this client's own poll()/runner keeps going. Same clock as poll() (R18).
+        """
         self.bus = bus  # bus.send is assumed thread-safe (SimBus/TcpBus and typical python-can backends are)
         self.cfg = cfg
         self._heartbeat_period_s = 1.0 / heartbeat_hz
+        self._keepalive_timeout = keepalive_timeout
+        self._last_keepalive: float | None = None
 
         self._lock = threading.Lock()
         self.joints: dict[int, JointState] = {a.node: JointState(node=a.node, name=a.name) for a in cfg.axes}
@@ -65,8 +73,9 @@ class ArmClient:
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        # Set by the background runner when the bus fails under it (broken TCP pipe,
-        # unplugged USB-CAN adapter, ...); the runner then stops (R19). Callers poll alive().
+        # Set when the background runner stops on an exception (R19): a can.CanError /
+        # OSError means the bus failed under it (broken TCP pipe, unplugged USB-CAN
+        # adapter, ...); anything else is an internal error. Callers poll alive().
         self.error: BaseException | None = None
 
     # -- sans-IO core ----------------------------------------------------
@@ -84,10 +93,20 @@ class ArmClient:
             self._on_telemetry(decoded)
         # Estop/Heartbeat/CommandMsg/Setpoint are master->node traffic; nothing to update.
 
+    def keepalive(self, now: float) -> None:
+        """Tell the client the application loop is alive (R23; see keepalive_timeout)."""
+        self._last_keepalive = now
+
+    def _keepalive_fresh(self, now: float) -> bool:
+        if self._keepalive_timeout is None:
+            return True
+        last = self._last_keepalive
+        return last is not None and now - last <= self._keepalive_timeout
+
     def poll(self, now: float) -> None:
-        """Send a HEARTBEAT if due, then drain bus.recv(timeout=0) into process()."""
+        """Send a HEARTBEAT if due (and the keepalive is fresh), then drain bus.recv(timeout=0) into process()."""
         self._now = now
-        if now - self._last_heartbeat_t >= self._heartbeat_period_s:
+        if now - self._last_heartbeat_t >= self._heartbeat_period_s and self._keepalive_fresh(now):
             self.bus.send(protocol.encode_heartbeat(self._seq))
             self._seq = (self._seq + 1) & 0xFF
             self._last_heartbeat_t = now
@@ -143,7 +162,9 @@ class ArmClient:
             while not self._stop_event.is_set():
                 self.poll(time.monotonic())
                 time.sleep(_POLL_PERIOD_S)
-        except Exception as exc:  # noqa: BLE001 -- any bus failure ends the runner; record it (R19)
+        except (can.CanError, OSError) as exc:  # the bus failed under us (R19)
+            self.error = exc
+        except Exception as exc:  # noqa: BLE001 -- a bug, not a bus failure: still stop and surface it
             self.error = exc
 
     def alive(self) -> bool:

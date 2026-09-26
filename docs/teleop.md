@@ -67,10 +67,10 @@ degrees. When an axis has a fault, `| FAULT j2:FOLLOWING` is added to the end.
 | Right stick left/right | j5 wrist rotate. Right = +q5 |
 | D-pad up / down | j4 wrist bend +/- at half its max speed |
 | L2 / R2 | j6 gripper: velocity = (L2 - R2) x max. L2 opens, R2 closes toward 0 (closed) |
-| Circle | **E-STOP** for every axis, whether or not you are armed |
-| Cross | ENABLE (DISABLED to READY). It does not clear faults. |
+| Circle | **E-STOP** for every axis while held, whether or not you are armed |
+| Cross | ENABLE (DISABLED to READY). It does not clear faults. Only works while not armed. |
 | Options | Clear faults. Faulted axes go to DISABLED, then press Cross. |
-| Triangle | HOME every axis |
+| Triangle | HOME every axis. Only works while not armed. |
 | Square | Switch between joint and cartesian mode. Only works while not armed. |
 
 The sticks have a radial deadzone of 0.12 (`deadzone` in `config/teleop.yaml`). The loop runs
@@ -87,17 +87,32 @@ in cartesian mode, even with L1 held.
   case a frame is lost. The axes then decelerate to a stop on their own ramps. The same happens
   when the controller drops out. At all other times while not armed, teleop sends no setpoints,
   so it never interferes with HOME or anything else. Heartbeats alone keep the axis watchdogs fed.
-- **Buttons act on the press.** Holding a button does nothing more. A button held while the
-  program starts, or held through a controller reconnect, does nothing until you release it.
-- **E-STOP (Circle) always works**, armed or not, and it also disarms you. To recover: Options
-  (clear faults), then Cross (enable), then press L1 again.
+- **E-STOP (Circle) always works.** It acts while the button is held, not just when you press
+  it: E-STOP is sent on every loop while Circle is down, armed or not, including when Circle was
+  already held at start-up or through a controller reconnect. It also disarms you, and you
+  cannot arm while it is held. To recover: release Circle, press Options (clear faults), then
+  Cross (enable), then press L1 again.
+- **Other buttons act on the press.** Holding a button does nothing more. A button held while
+  the program starts, or held through a controller reconnect, does nothing until you release it.
+  Cross (enable), Triangle (home) and Square (mode) only work while you are **not** armed.
 - **Losing the controller** (Bluetooth drops out, battery dies, cable pulled) disarms at once,
   and the arm stops. When the controller comes back you must **release and press L1 again**.
   Holding it through the reconnect is not enough.
+- **A hung teleop loop stops the arm.** Heartbeats are only sent while the teleop loop is alive:
+  it checks in on every iteration, and the check-in expires after 100 ms. If the loop stalls
+  (a stuck gamepad driver, a paused terminal, a bug), the heartbeats stop and every axis
+  watchdog-faults 200 ms later. The last jog command does not keep running.
 - **Losing the bus** (sim closed, USB-CAN adapter unplugged): teleop prints
   `error: bus lost: <reason>` and exits with code 2. Without heartbeats, every axis
   watchdog-faults within 200 ms by itself.
-- **Ctrl-C** (or SIGTERM) sends DISABLE to every axis and exits with code 0.
+- **Any other failure** (bad `config/teleop.yaml`, gamepad start-up or read error, internal
+  error): teleop prints a single `error: ...` line and exits with code 2. Once the loop has
+  started, it still sends DISABLE on the way out.
+- **Ctrl-C** (or SIGTERM) sends DISABLE to every axis and exits with code 0. Ctrl-C while the bus
+  is still connecting exits with code 130.
+- A FAULTed or DISABLED axis is unpowered. In the sim, the shoulder then creeps down under
+  gravity at about 1–2°/s. Expect the same on the real robot for any joint that can be driven
+  backwards by its load.
 - The axes enforce their own soft limits, velocity and acceleration limits, and following-error
   and overcurrent faults in firmware. Teleop never relies on the PC to stay inside them. A
   homed axis brakes to a stop at its soft limit instead of faulting. Before homing there are no
