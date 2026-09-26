@@ -14,12 +14,14 @@
 
 typedef struct { axis_t a; plant_t p; float max_err; float max_pos; } rig_t;
 
-static void rig_init(rig_t *r, const axis_config_t *cfg) {
+/* static inline: this header may be included by test files that don't use
+ * every helper, and -Werror would otherwise trip on -Wunused-function. */
+static inline void rig_init(rig_t *r, const axis_config_t *cfg) {
     axis_init(&r->a, cfg); plant_init(&r->p, 20000.0f, 0.02f); r->max_err = 0; r->max_pos = -1e9f;
 }
-static void cmd(rig_t *r, uint8_t c) { can_frame_t f; proto_encode_command(&f, 3, c); axis_on_frame(&r->a, &f); }
-static void sp(rig_t *r, uint8_t kind, int32_t v) { can_frame_t f; proto_encode_setpoint(&f, 3, kind, v); axis_on_frame(&r->a, &f); }
-static void run_ms(rig_t *r, int ms) {
+static inline void cmd(rig_t *r, uint8_t c) { can_frame_t f; proto_encode_command(&f, 3, c); axis_on_frame(&r->a, &f); }
+static inline void sp(rig_t *r, uint8_t kind, int32_t v) { can_frame_t f; proto_encode_setpoint(&f, 3, kind, v); axis_on_frame(&r->a, &f); }
+static inline void run_ms(rig_t *r, int ms) {
     for (int i = 0; i < ms; i++) {
         if (i % 50 == 0) { can_frame_t f; proto_encode_heartbeat(&f, 0); axis_on_frame(&r->a, &f); }
         axis_inputs_t in = {plant_count(&r->p), r->p.current_ma};

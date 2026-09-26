@@ -211,6 +211,7 @@ void axis_tick(axis_t *a, const axis_inputs_t *in, axis_outputs_t *out) {
             break;
     }
 
+    a->duty = clampf(a->duty, -a->cfg->max_duty, a->cfg->max_duty);
     out->duty = a->duty * (float)a->cfg->motor_sign;
 
     bool status_due = (a->tick % AXIS_STATUS_DIVIDER) == 0;
