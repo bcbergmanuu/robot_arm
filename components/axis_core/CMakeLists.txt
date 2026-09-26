@@ -2,6 +2,7 @@ set(AXIS_CORE_SRCS
     src/version.c
     src/pid.c
     src/protocol.c
+    src/config_table.c
 )
 
 if(ESP_PLATFORM)

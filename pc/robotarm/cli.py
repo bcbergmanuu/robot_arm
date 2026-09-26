@@ -2,10 +2,13 @@
 import argparse
 import sys
 
+from robotarm.tools import gen_config
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="robotarm", description=__doc__)
-    parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    gen_config.register(subparsers)
     return parser
 
 

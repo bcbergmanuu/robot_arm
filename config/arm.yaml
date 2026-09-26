@@ -1,0 +1,133 @@
+# Single source of truth for per-axis parameters (firmware + simulator + master).
+# Anything marked "(assumed)" is an estimate: measure it on the robot (see docs/bringup.md).
+# Joint convention: q = 0 is the arm pointing straight up; J2/J3/J4 positive tilts toward +x.
+supply_voltage: 24.0
+control_hz: 1000
+
+motors:
+  # Faulhaber datasheet-class values (assumed) -- replace with exact datasheet numbers.
+  faulhaber_2657cr_24v: {nominal_v: 24.0, R: 4.2,  L: 0.00046, kt: 0.0347, j_rotor: 2.0e-6}
+  faulhaber_2657cr_12v: {nominal_v: 12.0, R: 1.14, L: 0.00012, kt: 0.0191, j_rotor: 2.0e-6}
+  faulhaber_2642cr_12v: {nominal_v: 12.0, R: 1.9,  L: 0.00018, kt: 0.0164, j_rotor: 1.1e-6}
+  faulhaber_2224sr_12v: {nominal_v: 12.0, R: 8.7,  L: 0.00030, kt: 0.0143, j_rotor: 0.26e-6}
+
+current_sense:
+  # TB9051FTG OCM mirror (~0.24 % of motor current) into R3 = 220 ohm -> ~528 mV/A (assumed, verify)
+  mv_per_a: 528.0
+  adc_max_mv: 2500.0      # with ADC_ATTEN_DB_12 on the ESP32-S3 (usable range ~2.5 V)
+
+geometry:                 # Katana 6M180-like, metres (assumed, measure)
+  base_height: 0.2015
+  upper_arm: 0.190
+  forearm: 0.139
+  wrist: 0.060            # wrist pitch axis -> wrist roll body
+  gripper: 0.130          # wrist roll body -> gripper tip
+
+defaults:
+  gear_efficiency: 0.7            # (assumed)
+  watchdog_ms: 200
+  max_following_error_deg: 10.0
+  gains:
+    pos_kp: 20.0                  # 1/s
+    pos_ki: 0.0
+    vel_kp: 0.00004               # duty per count/s -- retuned in Task 12
+    vel_ki: 0.002
+    vel_i_limit: 0.3              # duty
+
+axes:
+  - node: 1
+    name: hip
+    joint: j1
+    encoder_cpr: 128
+    gear_ratio: 100.0
+    motor: faulhaber_2657cr_24v
+    motor_sign: 1
+    encoder_sign: 1
+    soft_limits_deg: [-160, 160]  # (assumed)
+    hard_limits_deg: [-169, 169]  # mechanical stops (assumed)
+    max_velocity_deg_s: 60
+    max_accel_deg_s2: 180
+    max_current_ma: 2500
+    home: {direction: -1, velocity_deg_s: 15, current_ma: 1800, timeout_s: 40}
+    link_mass_kg: 1.2             # (assumed)
+    friction: {coulomb_nm: 0.8, viscous_nm_s: 0.5}   # at the joint (assumed)
+  - node: 2
+    name: shoulder
+    joint: j2
+    encoder_cpr: 64
+    gear_ratio: 370.0             # 3.7 planetary x strainwave 100
+    motor: faulhaber_2657cr_12v
+    motor_sign: 1
+    encoder_sign: 1
+    soft_limits_deg: [-25, 100]
+    hard_limits_deg: [-31, 104]
+    max_velocity_deg_s: 45
+    max_accel_deg_s2: 120
+    max_current_ma: 2500
+    home: {direction: 1, velocity_deg_s: 10, current_ma: 1800, timeout_s: 30}
+    link_mass_kg: 1.0
+    friction: {coulomb_nm: 1.2, viscous_nm_s: 0.8}
+  - node: 3
+    name: elbow
+    joint: j3
+    encoder_cpr: 360
+    gear_ratio: 370.0
+    motor: faulhaber_2642cr_12v
+    motor_sign: 1
+    encoder_sign: 1
+    soft_limits_deg: [-115, 115]
+    hard_limits_deg: [-122, 122]
+    max_velocity_deg_s: 60
+    max_accel_deg_s2: 180
+    max_current_ma: 2000
+    home: {direction: -1, velocity_deg_s: 10, current_ma: 1500, timeout_s: 30}
+    link_mass_kg: 0.8
+    friction: {coulomb_nm: 0.8, viscous_nm_s: 0.5}
+  - node: 4
+    name: wrist_bend
+    joint: j4
+    encoder_cpr: 128              # (assumed: not documented in README)
+    gear_ratio: 100.0             # (assumed)
+    motor: faulhaber_2224sr_12v   # (assumed)
+    motor_sign: 1
+    encoder_sign: 1
+    soft_limits_deg: [-110, 110]
+    hard_limits_deg: [-117, 117]
+    max_velocity_deg_s: 90
+    max_accel_deg_s2: 360
+    max_current_ma: 800
+    home: {direction: 1, velocity_deg_s: 15, current_ma: 600, timeout_s: 30}
+    link_mass_kg: 0.4
+    friction: {coulomb_nm: 0.2, viscous_nm_s: 0.1}
+  - node: 5
+    name: wrist_rotate
+    joint: j5
+    encoder_cpr: 128
+    gear_ratio: 100.0
+    motor: faulhaber_2224sr_12v
+    motor_sign: 1
+    encoder_sign: 1
+    soft_limits_deg: [-160, 160]
+    hard_limits_deg: [-168, 168]
+    max_velocity_deg_s: 120
+    max_accel_deg_s2: 480
+    max_current_ma: 800
+    home: {direction: -1, velocity_deg_s: 20, current_ma: 600, timeout_s: 30}
+    link_mass_kg: 0.3
+    friction: {coulomb_nm: 0.1, viscous_nm_s: 0.05}
+  - node: 6
+    name: gripper
+    joint: j6
+    encoder_cpr: 128
+    gear_ratio: 100.0
+    motor: faulhaber_2224sr_12v
+    motor_sign: 1
+    encoder_sign: 1
+    soft_limits_deg: [0, 55]      # 0 = closed
+    hard_limits_deg: [-3, 60]
+    max_velocity_deg_s: 60
+    max_accel_deg_s2: 360
+    max_current_ma: 800
+    home: {direction: -1, velocity_deg_s: 10, current_ma: 500, timeout_s: 20}
+    link_mass_kg: 0.2
+    friction: {coulomb_nm: 0.05, viscous_nm_s: 0.02}
