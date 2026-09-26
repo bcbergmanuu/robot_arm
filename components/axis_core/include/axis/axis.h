@@ -31,6 +31,8 @@ typedef struct {
 #define AXIS_TX_QUEUE_LEN 8
 #define AXIS_VEL_WINDOW 8
 #define AXIS_STATUS_DIVIDER 10 /* 100 Hz status at 1 kHz tick */
+#define AXIS_HOME_SETTLE_MS 300 /* ignore stall detection right after homing starts */
+#define AXIS_HOME_STALL_MS 100  /* consecutive ms of stall evidence before declaring home found */
 
 typedef struct {
     const axis_config_t *cfg;

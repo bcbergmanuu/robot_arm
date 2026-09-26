@@ -59,10 +59,15 @@ static void handle_command(axis_t *a, uint8_t cmd) {
             }
             break;
         case PROTO_CMD_HOME:
-            if (a->state == AXIS_DISABLED || a->state == AXIS_READY) {
+            if ((a->state == AXIS_DISABLED || a->state == AXIS_READY) && a->faults == 0) {
                 a->state = AXIS_HOMING;
+                a->homed = false;
                 a->home_ms = 0;
                 a->stall_ms = 0;
+                a->sp_pos = (float)a->pos;
+                a->sp_vel = a->vel;
+                pidc_reset(&a->pos_pid);
+                pidc_reset(&a->vel_pid);
             }
             break;
         case PROTO_CMD_CLEAR_FAULT:
@@ -173,8 +178,44 @@ static void run_ready(axis_t *a) {
     }
 }
 
-/* Stub: homing sequence lands in Task 7. */
-static void run_homing(axis_t *a) { a->duty = 0.0f; }
+static void run_homing(axis_t *a) {
+    const axis_config_t *cfg = a->cfg;
+
+    /* No position loop, no following-error check: drive toward the end stop
+     * at a ramped, PID-held velocity until a stall is detected. */
+    float v_des = (float)cfg->home_dir * cfg->home_vel;
+    a->sp_vel += clampf(v_des - a->sp_vel, -cfg->max_acc * AXIS_DT, cfg->max_acc * AXIS_DT);
+    float vel_cmd = a->sp_vel;
+    a->duty = cfg->vel_ff * vel_cmd + pidc_update(&a->vel_pid, vel_cmd - a->vel, AXIS_DT);
+
+    a->home_ms++;
+    if (a->home_ms > cfg->home_timeout_ms) {
+        enter_fault(a, AXIS_FAULT_HOMING);
+        return;
+    }
+
+    if (a->home_ms > AXIS_HOME_SETTLE_MS &&
+        (a->current_ma >= cfg->home_current_ma || fabsf(a->vel) < 0.2f * cfg->home_vel)) {
+        a->stall_ms++;
+    } else {
+        a->stall_ms = 0;
+    }
+
+    if (a->stall_ms >= AXIS_HOME_STALL_MS) {
+        int32_t raw = a->pos + a->zero_offset; /* sign-corrected raw encoder count this tick */
+        axis_set_home(a, raw - cfg->home_pos); /* pos == home_pos at the stop */
+        a->pos = cfg->home_pos;
+
+        a->state = AXIS_READY;
+        a->sp_kind = PROTO_SP_POSITION;
+        a->target = (float)cfg->home_pos; /* clamped by the generator into [pos_min, pos_max]: backs off */
+        a->sp_pos = (float)a->pos;
+        a->sp_vel = 0.0f;
+        pidc_reset(&a->pos_pid);
+        pidc_reset(&a->vel_pid);
+        a->duty = 0.0f;
+    }
+}
 
 void axis_init(axis_t *a, const axis_config_t *cfg) {
     memset(a, 0, sizeof(*a));
