@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.22)
+project(robot_arm_host C)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+enable_testing()
+
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../components/axis_core axis_core)
+
+function(axis_test name)
+    add_executable(${name} tests/${name}.c)
+    target_link_libraries(${name} PRIVATE axis_core)
+    target_compile_options(${name} PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+axis_test(test_smoke)

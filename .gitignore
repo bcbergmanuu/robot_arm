@@ -66,6 +66,9 @@ env/
 .ccls-cache/
 compile_commands.json
 
+# Generated documentation images
+docs/img/*.tmp.png
+
 # Windows specific
 Thumbs.db
 ehthumbs.db
