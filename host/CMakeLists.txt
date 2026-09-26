@@ -14,3 +14,4 @@ function(axis_test name)
 endfunction()
 
 axis_test(test_smoke)
+axis_test(test_pid)
