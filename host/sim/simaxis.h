@@ -25,7 +25,8 @@ void simaxis_destroy(simaxis_t *s);
 
 /* Advance n 1 kHz ticks. joint_q (rad) / joint_qd (rad/s) come from the physics
  * engine and are held constant across the call (q is extrapolated with qd
- * inside, for each tick's simulated encoder read). Returns the mean joint
+ * inside, for each tick's simulated encoder read). The encoder is incremental like
+ * the real board: it reads 0 at the first simaxis_step, wherever the joint is. Returns the mean joint
  * torque (Nm) produced over the call, for the physics engine to apply. */
 double simaxis_step(simaxis_t *s, int n_ticks, double joint_q, double joint_qd);
 

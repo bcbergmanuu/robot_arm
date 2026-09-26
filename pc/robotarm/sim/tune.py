@@ -9,6 +9,14 @@ Gains live in config/arm.yaml and are compiled into libsimaxis, so the tuning
 loop is: edit gains -> `uv run robotarm gen-config` -> `make host` -> rerun.
 Procedure per axis: raise vel_kp until the velocity step overshoots > 10 %, then
 take 50 %; set vel_ki so vel_kp/vel_ki is 20-50 ms; set pos_kp for 1-2 % overshoot.
+
+Findings (Task 12; measured thresholds per axis are tabulated in docs/simulator.md):
+- The >10 % threshold depends on the pose (inertia), so it was taken at the worse of
+  the homed pose and the all-zero (vertical, low inertia) pose; vel_ki = vel_kp / 30 ms.
+- pos_kp cannot produce 1-2 % overshoot in a useful range: the setpoint is a profiled
+  trajectory with velocity feed-forward, so overshoot stays <= 0.35 % for pos_kp 20-150
+  and only reaches ~1.7 % around 250, where steady-state ripple starts. pos_kp = 50 was
+  chosen (about 5x below the ripple onset); it only shortens the following lag.
 """
 
 from __future__ import annotations

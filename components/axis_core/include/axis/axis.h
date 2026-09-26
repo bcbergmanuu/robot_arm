@@ -59,4 +59,4 @@ void axis_init(axis_t *a, const axis_config_t *cfg);
 void axis_tick(axis_t *a, const axis_inputs_t *in, axis_outputs_t *out);
 void axis_on_frame(axis_t *a, const can_frame_t *f);
 bool axis_pop_tx(axis_t *a, can_frame_t *out);
-void axis_set_home(axis_t *a, int32_t raw_at_zero); /* marks homed; raw is sign-corrected */
+void axis_set_home(axis_t *a, int32_t raw_at_zero); /* marks homed, re-zeroes pos, re-primes the velocity window; raw is sign-corrected */

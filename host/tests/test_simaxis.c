@@ -134,9 +134,32 @@ static void test_wiring_sign_variants_still_move_positive(void) {
     }
 }
 
+/* Ruling R16b: the simulated encoder is incremental like the real board -- it reads 0 at the
+ * first simaxis_step wherever the joint is, and counts relative to that pose afterwards. */
+static void test_encoder_is_incremental_from_first_step(void) {
+    motor_params_t motor = shoulder_motor();
+    const float counts_per_rad = 256.0f * 370.0f / 6.2831853f;
+    for (int sign = -1; sign <= 1; sign += 2) {
+        axis_config_t cfg = *axis_config_for_node(2);
+        cfg.encoder_sign = (int8_t)sign;
+        simaxis_t *s = simaxis_create_with_config(&cfg, &motor);
+        simaxis_debug_t dbg;
+
+        simaxis_step(s, 1, 1.0, 0.0);                /* arm powered up at q = 1 rad */
+        simaxis_get_debug(s, &dbg);
+        TT_CHECK(dbg.pos == 0);
+
+        simaxis_step(s, 1, 1.1, 0.0);                /* joint moved +0.1 rad */
+        simaxis_get_debug(s, &dbg);
+        TT_NEAR((float)dbg.pos, 0.1f * counts_per_rad, 2.0f);   /* encoder_sign cancels in pos */
+        simaxis_destroy(s);
+    }
+}
+
 int main(void) {
     TT_RUN(test_unknown_node_returns_null);
     TT_RUN(test_duty_command_moves_joint_positive_within_a_second);
     TT_RUN(test_wiring_sign_variants_still_move_positive);
+    TT_RUN(test_encoder_is_incremental_from_first_step);
     return TT_DONE();
 }

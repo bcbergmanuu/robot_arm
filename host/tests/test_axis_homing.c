@@ -1,3 +1,5 @@
+#include <math.h>
+
 #include "axis/axis.h"
 #include "rig.h"
 #include "tinytest.h"
@@ -58,11 +60,34 @@ static void test_rehoming_from_ready(void) {
     TT_CHECK(r.a.homed && r.a.state == AXIS_READY);
 }
 
+/* R16: the zero offset jumps when home is found (raw at the stop 37000 -> pos -21000).
+ * The velocity window must be re-primed, or the next ticks see a ~-7e6 counts/s spike. */
+static void test_no_velocity_spike_when_home_is_set(void) {
+    rig_t r; rig_init(&r, &TEST_CFG);
+    r.p.pos = 40000.0; r.p.has_stop = 1; r.p.stop_pos = 37000.0; r.p.stop_dir = -1;
+    cmd(&r, PROTO_CMD_HOME);
+    int ms = 0;
+    while (!r.a.homed && ms < 5000) { run_ms(&r, 1); ms++; }
+    TT_CHECK(r.a.homed);
+    float max_vel = 0.0f, max_duty = 0.0f;
+    for (int i = 0; i < 20; i++) {
+        run_ms(&r, 1);
+        if (fabsf(r.a.vel) > max_vel) max_vel = fabsf(r.a.vel);
+        if (fabsf(r.a.duty) > max_duty) max_duty = fabsf(r.a.duty);
+    }
+    TT_CHECK(max_vel < 2000.0f);
+    TT_CHECK(max_duty < 0.2f);
+    run_ms(&r, 2000);
+    TT_NEAR(r.a.pos, TEST_CFG.pos_min, 10);
+    TT_CHECK(r.a.state == AXIS_READY && r.a.faults == 0);
+}
+
 int main(void) {
     TT_RUN(test_homes_against_stop_and_backs_off);
     TT_RUN(test_homing_times_out_without_stop);
     TT_RUN(test_home_rejected_while_faulted);
     TT_RUN(test_stall_ignored_during_settle_window);
     TT_RUN(test_rehoming_from_ready);
+    TT_RUN(test_no_velocity_spike_when_home_is_set);
     return TT_DONE();
 }

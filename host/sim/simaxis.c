@@ -17,6 +17,8 @@ struct simaxis {
                             * fed as axis_inputs_t.current_ma on the *next* tick */
     float last_duty;      /* out.duty from the most recent axis_tick, for debug */
     double last_torque;   /* mean joint torque returned by the most recent simaxis_step */
+    int encoder_started;  /* the incremental encoder counts from the pose at the first step */
+    int32_t encoder_count0;
 };
 
 simaxis_t *simaxis_create_with_config(const axis_config_t *cfg, const motor_params_t *motor) {
@@ -54,13 +56,21 @@ double simaxis_step(simaxis_t *s, int n_ticks, double joint_q, double joint_qd) 
      * a positive commanded duty must produce positive joint torque. */
     const float omega_electrical = motor_sign * (float)(joint_qd * (double)gear_ratio);
 
+    if (!s->encoder_started) {
+        /* Incremental encoder, like the real board: it reads 0 at power-up wherever the
+         * joint is; only homing gives positions an absolute meaning. */
+        s->encoder_count0 = motor_encoder_count(&s->motor, joint_q * (double)gear_ratio);
+        s->encoder_started = 1;
+    }
+
     double torque_sum = 0.0;
     long substep_count = 0;
 
     for (int tick = 0; tick < n_ticks; tick++) {
         double t = (double)tick * (double)AXIS_DT;
         double motor_angle = (joint_q + joint_qd * t) * (double)gear_ratio;
-        int32_t encoder_raw = (int32_t)cfg->encoder_sign * motor_encoder_count(&s->motor, motor_angle);
+        int32_t encoder_raw =
+            (int32_t)cfg->encoder_sign * (motor_encoder_count(&s->motor, motor_angle) - s->encoder_count0);
 
         axis_inputs_t in = {.encoder_raw = encoder_raw, .current_ma = s->current_ma};
         axis_outputs_t out;

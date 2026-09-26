@@ -45,15 +45,21 @@ static void reset_trajectory(axis_t *a) {
     pidc_reset(&a->vel_pid);
 }
 
-/* First tick after power-up: the encoder may already be far from 0, so start the
- * velocity window full of the current position (vel = 0) instead of zeros, and
- * resync any trajectory a command (ENABLE/HOME/setpoint) started before pos was
- * known -- otherwise the stale sp_pos = 0 trips a false FOLLOWING fault. */
-static void prime_from_first_reading(axis_t *a) {
+/* Fill the velocity window with the current pos (vel = 0). Needed whenever pos
+ * jumps without the joint moving -- the first encoder read and a new zero offset --
+ * or the next AXIS_VEL_WINDOW ticks would estimate a huge bogus velocity. */
+static void prime_velocity_window(axis_t *a) {
     for (uint8_t i = 0; i < AXIS_VEL_WINDOW; i++) a->pos_hist[i] = a->pos;
     a->hist_idx = 0;
     a->hist_fill = AXIS_VEL_WINDOW;
     a->vel = 0.0f;
+}
+
+/* First tick after power-up: the encoder may read anything, so prime the velocity
+ * window and resync any trajectory a command (ENABLE/HOME/setpoint) started before
+ * pos was known -- otherwise the stale sp_pos = 0 trips a false FOLLOWING fault. */
+static void prime_from_first_reading(axis_t *a) {
+    prime_velocity_window(a);
     a->primed = true;
     if (a->state == AXIS_READY || a->state == AXIS_HOMING) reset_trajectory(a);
 }
@@ -217,8 +223,7 @@ static void run_homing(axis_t *a) {
 
     if (a->stall_ms >= AXIS_HOME_STALL_MS) {
         int32_t raw = a->pos + a->zero_offset; /* sign-corrected raw encoder count this tick */
-        axis_set_home(a, raw - cfg->home_pos); /* pos == home_pos at the stop */
-        a->pos = cfg->home_pos;
+        axis_set_home(a, raw - cfg->home_pos); /* now pos == home_pos, velocity window re-primed */
 
         a->state = AXIS_READY;
         a->sp_kind = PROTO_SP_POSITION;
@@ -317,6 +322,8 @@ bool axis_pop_tx(axis_t *a, can_frame_t *out) {
 }
 
 void axis_set_home(axis_t *a, int32_t raw_at_zero) {
+    a->pos += a->zero_offset - raw_at_zero; /* same encoder reading, new zero */
     a->zero_offset = raw_at_zero;
     a->homed = true;
+    prime_velocity_window(a);
 }

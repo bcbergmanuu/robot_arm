@@ -92,3 +92,19 @@ on one axis; the procedure and the tuned values are in `pc/robotarm/sim/tune.py`
 `config/arm.yaml`. The reported homing offset (0.1–0.4° per axis) is expected: the axis registers
 its home while pressed into MuJoCo's slightly compliant joint limit (default `solref`), so its
 zero sits off by that penetration depth — deterministic, and well inside the 1° homing tolerance.
+
+Measured velocity-loop thresholds (loop gain = `vel_kp` × no-load counts/s per unit duty, `vel_ki` = 0,
+first velocity-step overshoot > 10 %, worse of the homed and the all-zero pose) and the chosen gains
+(50 % of the threshold, `vel_ki = vel_kp / 30 ms`, `pos_kp` = 50 for all axes):
+
+| axis | loop gain at > 10 % | `vel_kp` | `vel_ki` |
+|---|---|---|---|
+| hip | ~8 (all-zero pose; ~28 when homed) | 7.0e-5 | 2.3e-3 |
+| shoulder | ~9 | 8.8e-5 | 2.9e-3 |
+| elbow | ~9 | 1.4e-5 | 4.7e-4 |
+| wrist_bend (gear 200) | ~15 | 5.5e-5 | 1.8e-3 |
+| wrist_rotate | ~11 | 4.0e-5 | 1.3e-3 |
+| gripper | ~17 | 6.2e-5 | 2.1e-3 |
+
+The simulated encoders are incremental like the real boards: each reads 0 at the first
+simulated tick wherever the joint is, so positions only become absolute after homing.

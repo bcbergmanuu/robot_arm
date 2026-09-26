@@ -33,6 +33,9 @@ class SimWorld:
         self.model = load_model(cfg)
         self.data = mujoco.MjData(self.model)
         self._dt = self.model.opt.timestep
+        if self._dt != 0.001:
+            raise ValueError(f"model timestep must be 1 ms (one axis tick per mj_step), got {self._dt}")
+        self._closed = False
         self._lock = threading.RLock()
         self._outgoing: list[can.Message] = []
         self._ms = 0
@@ -54,6 +57,7 @@ class SimWorld:
 
     def step(self, n_ms: int = 1) -> None:
         with self._lock:
+            self._check_open()
             data = self.data
             for _ in range(n_ms):
                 q = data.qpos[self._qpos_adr]
@@ -72,6 +76,7 @@ class SimWorld:
     def deliver(self, msg: can.Message) -> None:
         """Put a frame on the bus: every node sees it and filters by id itself."""
         with self._lock:
+            self._check_open()
             for axis in self.axes:
                 axis.send(msg)
 
@@ -96,8 +101,14 @@ class SimWorld:
             mujoco.mj_forward(self.model, self.data)
 
     def close(self) -> None:
-        for axis in self.axes:
-            axis.close()
+        with self._lock:
+            self._closed = True
+            for axis in self.axes:
+                axis.close()
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("SimWorld is closed")
 
 
 class SimBus(can.BusABC):
