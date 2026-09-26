@@ -32,17 +32,27 @@ class JointState:
     state: AxisState = AxisState.DISABLED
     faults: Fault = field(default_factory=lambda: Fault(0))
     homed: bool = False
-    last_seen: float | None = None  # timestamp of the last STATUS
+    last_seen: float | None = None  # poll()'s `now` when the last STATUS was processed (R18)
 
 
 class ArmClient:
     """Sans-IO core: feed frames with process(msg), call poll(now) periodically.
 
     The threaded runner (start/close) does both with wall-clock time.
+
+    Liveness uses exactly ONE clock: the caller's (controller ruling R18).
+    `JointState.last_seen` is stamped with the `now` most recently passed to
+    `poll()`, never with the received frame's own `msg.timestamp` -- TcpBus
+    frames carry no timestamp (0.0), real python-can backends may stamp epoch
+    `time.time()` (or 0.0), and any of those mixed with `poll()`'s wall clock
+    (`time.monotonic()` from the background thread, or whatever clock the
+    caller drives `poll()` with) would make `connected()` meaningless outside
+    the in-process sim. Before the first `poll()` call, `last_seen` stays
+    `None`, so `connected()` is False.
     """
 
     def __init__(self, bus: can.BusABC, cfg: ArmConfig, heartbeat_hz: float = 20.0) -> None:
-        self.bus = bus
+        self.bus = bus  # bus.send is assumed thread-safe (SimBus/TcpBus and typical python-can backends are)
         self.cfg = cfg
         self._heartbeat_period_s = 1.0 / heartbeat_hz
 
@@ -51,6 +61,7 @@ class ArmClient:
 
         self._seq = 0
         self._last_heartbeat_t = float("-inf")
+        self._now: float | None = None  # the `now` of the most recent poll() call (R18)
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -58,16 +69,21 @@ class ArmClient:
     # -- sans-IO core ----------------------------------------------------
 
     def process(self, msg: can.Message) -> None:
-        """Feed one received frame. Never raises; unknown/garbage frames are ignored."""
+        """Feed one received frame. Never raises; unknown/garbage frames are ignored.
+
+        Liveness (JointState.last_seen) is stamped with the most recent poll()
+        `now`, not with msg.timestamp -- see the class docstring (R18).
+        """
         decoded = protocol.decode(msg)
         if isinstance(decoded, protocol.Status):
-            self._on_status(decoded, msg.timestamp)
+            self._on_status(decoded)
         elif isinstance(decoded, protocol.Telemetry):
             self._on_telemetry(decoded)
         # Estop/Heartbeat/CommandMsg/Setpoint are master->node traffic; nothing to update.
 
     def poll(self, now: float) -> None:
         """Send a HEARTBEAT if due, then drain bus.recv(timeout=0) into process()."""
+        self._now = now
         if now - self._last_heartbeat_t >= self._heartbeat_period_s:
             self.bus.send(protocol.encode_heartbeat(self._seq))
             self._seq = (self._seq + 1) & 0xFF
@@ -78,7 +94,7 @@ class ArmClient:
                 break
             self.process(msg)
 
-    def _on_status(self, status: protocol.Status, timestamp: float) -> None:
+    def _on_status(self, status: protocol.Status) -> None:
         axis = self._axis_for_node(status.node)
         if axis is None:
             return
@@ -90,7 +106,7 @@ class ArmClient:
             js.state = status.state
             js.faults = status.faults
             js.homed = status.homed
-            js.last_seen = timestamp
+            js.last_seen = self._now
 
     def _on_telemetry(self, telemetry: protocol.Telemetry) -> None:
         axis = self._axis_for_node(telemetry.node)
@@ -190,6 +206,9 @@ class ArmClient:
             return any(js.faults for js in self.joints.values())
 
     def connected(self, now: float, stale_s: float = 0.5) -> bool:
-        """True iff every configured node has sent a STATUS within stale_s."""
+        """True iff every configured node has sent a STATUS within stale_s of `now`.
+
+        `now` must be on the same clock as the `now` passed to poll() (R18).
+        """
         with self._lock:
             return all(js.last_seen is not None and now - js.last_seen <= stale_s for js in self.joints.values())

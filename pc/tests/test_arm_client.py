@@ -1,4 +1,5 @@
 import math
+import threading
 import time
 
 import pytest
@@ -7,7 +8,9 @@ from robotarm import protocol as p
 from robotarm.config import load_arm_config
 from robotarm.master.arm_client import ArmClient, JointState
 from robotarm.sim.harness import run_lockstep
+from robotarm.sim.server import SimServer, run_realtime
 from robotarm.sim.world import SimBus, SimWorld
+from robotarm.transport.tcp_bus import TcpBus
 
 
 @pytest.fixture
@@ -152,4 +155,72 @@ def test_start_and_close_stop_the_background_thread(cfg, sim):
     client.start()
     time.sleep(0.05)
     client.close()
-    assert client._thread is None
+    time.sleep(0.05)
+    # Black-box: no thread named "ArmClient" should still be running.
+    assert not any(t.name == "ArmClient" for t in threading.enumerate())
+
+
+# --- Fix round 1 additions (controller findings, R18) ---
+
+
+@pytest.mark.parametrize("bogus_timestamp", [0.0, time.time()])
+def test_connected_ignores_msg_timestamp_uses_poll_now(cfg, sim, bogus_timestamp):
+    """R18: last_seen must come from poll()'s `now`, never from msg.timestamp --
+    a frame stamped 0.0 (TcpBus) or epoch time.time() (a real python-can backend)
+    must still make connected() true once poll() has run with a monotonic-style now."""
+    world, bus = sim()
+    client = ArmClient(bus, cfg)
+    now = time.monotonic()
+    client.poll(now)  # establishes self._now on this clock; also drains any pending frames
+
+    for axis in cfg.axes:
+        msg = p.encode_status(axis.node, 0, p.AxisState.DISABLED, 0, 0)
+        msg.timestamp = bogus_timestamp
+        client.process(msg)
+
+    assert client.connected(now)
+
+
+def test_connected_over_tcp_then_stale_after_server_stops(cfg):
+    """End-to-end over TcpBus (real-time SimServer), not the in-process SimBus:
+    connected() must go true using the background thread's own wall clock, and
+    must go false again once the sim stops feeding new STATUS frames.
+
+    Stops the realtime driving loop (sim stop) rather than closing the TCP
+    socket, so the client's still-running background thread keeps sending
+    heartbeats successfully (just into a world that no longer advances or
+    replies) instead of hitting a broken pipe -- that socket-error/reconnect
+    path is out of scope for this fix (R18 is about the liveness clock)."""
+    world = SimWorld(cfg)
+    server = SimServer(world, port=0)
+    stop = threading.Event()
+    thread = threading.Thread(target=run_realtime, args=(world, server, False, stop), daemon=True)
+    thread.start()
+
+    bus = TcpBus(f"127.0.0.1:{server.port}")
+    client = ArmClient(bus, cfg)
+    client.start()
+    try:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not client.connected(time.monotonic()):
+            time.sleep(0.02)
+        assert client.connected(time.monotonic())
+        assert all(js.state == p.AxisState.DISABLED for js in client.joints.values())
+
+        stop.set()  # sim stop: run_realtime stops stepping/broadcasting; socket stays open
+        thread.join(2)
+
+        stale_s = 0.5
+        deadline = time.monotonic() + stale_s + 1.0  # margin, bounded
+        went_stale = False
+        while time.monotonic() < deadline:
+            if not client.connected(time.monotonic(), stale_s=stale_s):
+                went_stale = True
+                break
+            time.sleep(0.02)
+        assert went_stale
+    finally:
+        client.close()
+        bus.shutdown()
+        server.close()
+        world.close()
