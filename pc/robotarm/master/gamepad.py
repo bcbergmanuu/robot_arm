@@ -9,10 +9,12 @@ constructor by the caller -- this module never reads config files itself).
 
 pygame ties its event queue to the SDL video subsystem, so `pygame.event`
 needs `pygame.display.init()` to have run even though we never open a
-window. We use SDL's headless "dummy" video driver for that: no OS window
-ever appears, but hot-plug events (CONTROLLERDEVICEADDED/REMOVED,
-JOYDEVICEADDED/REMOVED) still flow. `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS`
-keeps the pad live even if some other window has focus.
+window. `Gamepad` sets SDL to its headless "dummy" video driver (via
+`os.environ.setdefault`, so a caller's own `SDL_VIDEODRIVER` still wins) the
+first time it initialises SDL: no OS window ever appears, but hot-plug
+events (CONTROLLERDEVICEADDED/REMOVED, JOYDEVICEADDED/REMOVED) still flow.
+`SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS` keeps the pad live even if some other
+window has focus.
 
 `Gamepad().poll()` never raises: with no pad attached (CI, a laptop with
 nothing plugged in) it returns a disconnected `GamepadState`.
@@ -24,14 +26,14 @@ import argparse
 import math
 import os
 import signal
+import threading
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-
-import pygame  # noqa: E402  (import after the env vars above, which SDL reads at init)
+import pygame
+import yaml
 
 try:
     import pygame._sdl2.controller as _sdl_controller
@@ -58,17 +60,6 @@ _CONTROLLER_BUTTON_TO_NAME = {
 }
 
 _INT16_MAX = 32767  # SDL axis range is -32768..32767; symmetric normalisation
-
-
-def _restore_sigint() -> None:
-    """SDL's video subsystem installs its own native SIGINT handler; put Python's
-    back so Ctrl-C raises KeyboardInterrupt instead of vanishing. Never raises
-    (e.g. when called from a non-main thread, where signal.signal is unavailable).
-    """
-    try:
-        signal.signal(signal.SIGINT, signal.default_int_handler)
-    except ValueError:
-        pass
 
 
 def _norm_axis(raw: int) -> float:
@@ -136,18 +127,49 @@ class Gamepad:
         self._raw_fallback = raw_fallback or {}
         self._use_controller_api = _sdl_controller is not None
         self._device: Any = None  # pygame._sdl2.controller.Controller or pygame.joystick.Joystick
+        self._caller_sigint_handler: Any = None
+        # Computed once: whether we're allowed to touch SIGINT at all (signal.signal()
+        # raises off the main thread; getsignal() is safe anywhere, but there's nothing
+        # useful to do with a handler we could never restore).
+        self._can_restore_sigint = threading.current_thread() is threading.main_thread()
         self._ready = self._init_sdl()
 
     def _init_sdl(self) -> bool:
+        # Capture whatever SIGINT handler the caller already had installed --
+        # sim/server.py and the Task 16 teleop loop install their own for graceful
+        # shutdown, and pygame.display.init() below must not clobber it.
+        if self._can_restore_sigint:
+            self._caller_sigint_handler = signal.getsignal(signal.SIGINT)
+        os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")  # headless: no window (see module docstring)
         try:
-            pygame.display.init()  # dummy driver (see module docstring): no window, but enables events
-            _restore_sigint()
+            pygame.display.init()  # enables pygame.event; SDL grabs SIGINT for itself here
+            self._restore_sigint()
             pygame.joystick.init()
             if self._use_controller_api:
                 _sdl_controller.init()
             return True
         except pygame.error:
             return False
+
+    def _restore_sigint(self) -> None:
+        """Put back the SIGINT handler captured in _init_sdl.
+
+        SDL's video subsystem installs its own native SIGINT handler once
+        `pygame.display.init()` runs (even with the dummy driver), silently
+        swallowing Ctrl-C (or whatever the caller's handler was supposed to
+        do) instead -- confirmed by direct experimentation (SIGTERM is
+        swallowed the same way; only SIGKILL gets through). A single restore
+        right after `pygame.display.init()` is enough in practice, but this
+        also runs on every poll() as cheap insurance (one syscall) against
+        anything -- SDL or otherwise -- touching SIGINT again later.
+        """
+        if not self._can_restore_sigint:
+            return
+        try:
+            signal.signal(signal.SIGINT, self._caller_sigint_handler)
+        except ValueError:
+            pass
 
     def poll(self) -> GamepadState:
         if not self._ready:
@@ -159,12 +181,7 @@ class Gamepad:
             return GamepadState(connected=False)
 
     def _poll_inner(self) -> GamepadState:
-        # SDL's video/event subsystem races our one-time restore in _init_sdl and can
-        # re-grab SIGINT for itself shortly after init (observed empirically -- a
-        # handful of extra instructions between display.init() and the restore call
-        # is enough to lose the race). Re-asserting it every poll costs one syscall
-        # and reliably keeps Ctrl-C working as KeyboardInterrupt.
-        _restore_sigint()
+        self._restore_sigint()  # see _restore_sigint's docstring: SDL can re-grab it
         pygame.event.pump()
         for event in pygame.event.get():
             self._handle_hotplug(event)
@@ -250,8 +267,26 @@ def _format_state(state: GamepadState) -> str:
             f"l2={state.l2:.2f} r2={state.r2:.2f} buttons=[{buttons}]")
 
 
+_TELEOP_CONFIG_RELATIVE_PATH = "config/teleop.yaml"
+
+
+def _load_raw_fallback() -> dict[str, Any]:
+    """Best-effort read of config/teleop.yaml's raw_joystick_fallback section, for the
+    `gamepad-test` CLI demo only -- Gamepad itself never touches config files (see
+    the class docstring); Task 16's teleop loop does its own config loading.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    path = repo_root / _TELEOP_CONFIG_RELATIVE_PATH
+    try:
+        with path.open() as f:
+            cfg = yaml.safe_load(f) or {}
+    except OSError:
+        return {}
+    return cfg.get("raw_joystick_fallback", {})
+
+
 def _run_gamepad_test(args: argparse.Namespace) -> int:
-    pad = Gamepad(deadzone=args.deadzone)
+    pad = Gamepad(deadzone=args.deadzone, raw_fallback=_load_raw_fallback())
     period_s = 0.1  # 10 Hz
     try:
         while True:

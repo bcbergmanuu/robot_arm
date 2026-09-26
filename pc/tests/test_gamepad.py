@@ -30,3 +30,25 @@ def test_real_gamepad_without_device_reports_disconnected():
     from robotarm.master.gamepad import Gamepad
     state = Gamepad().poll()       # CI/laptop without a pad: must not raise
     assert isinstance(state, GamepadState)
+
+
+def test_poll_preserves_callers_sigint_handler():
+    """sim/server.py and the Task 16 teleop loop install their own SIGINT handler for
+    graceful shutdown; Gamepad must not clobber it with pygame's/its own default.
+    """
+    import signal
+
+    from robotarm.master.gamepad import Gamepad
+
+    def custom_handler(signum, frame):
+        pass
+
+    original = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, custom_handler)
+    try:
+        pad = Gamepad()
+        pad.poll()
+        pad.poll()
+        assert signal.getsignal(signal.SIGINT) is custom_handler
+    finally:
+        signal.signal(signal.SIGINT, original)
