@@ -19,8 +19,7 @@ struct simaxis {
     double last_torque;   /* mean joint torque returned by the most recent simaxis_step */
 };
 
-simaxis_t *simaxis_create(uint8_t node_id, const motor_params_t *motor) {
-    const axis_config_t *cfg = axis_config_for_node(node_id);
+simaxis_t *simaxis_create_with_config(const axis_config_t *cfg, const motor_params_t *motor) {
     if (!cfg || !motor) return NULL;
 
     simaxis_t *s = (simaxis_t *)calloc(1, sizeof(*s));
@@ -32,6 +31,10 @@ simaxis_t *simaxis_create(uint8_t node_id, const motor_params_t *motor) {
     return s;
 }
 
+simaxis_t *simaxis_create(uint8_t node_id, const motor_params_t *motor) {
+    return simaxis_create_with_config(axis_config_for_node(node_id), motor);
+}
+
 void simaxis_destroy(simaxis_t *s) { free(s); }
 
 double simaxis_step(simaxis_t *s, int n_ticks, double joint_q, double joint_qd) {
@@ -40,7 +43,16 @@ double simaxis_step(simaxis_t *s, int n_ticks, double joint_q, double joint_qd) 
     const axis_config_t *cfg = s->cfg;
     const float gear_ratio = s->motor.p.gear_ratio;
     const float gear_efficiency = s->motor.p.gear_efficiency;
-    const float omega_motor = (float)(joint_qd * (double)gear_ratio);
+    const float motor_sign = (float)cfg->motor_sign;
+    /* motor_sign models a motor wired in reverse: axis_tick already pre-multiplies
+     * its output duty by motor_sign to compensate (axis.c:257), so the "hardware"
+     * duty out.duty *is* the terminal voltage command as-is (no extra flip here).
+     * The same wiring reversal flips which physical rotation direction produces
+     * which back-EMF sign, so the electrical-frame speed motor_step sees for its
+     * back-EMF term also needs the motor_sign flip. Both cancel in the resulting
+     * joint torque (motor_sign^2 == 1), which is the point: whatever the wiring,
+     * a positive commanded duty must produce positive joint torque. */
+    const float omega_electrical = motor_sign * (float)(joint_qd * (double)gear_ratio);
 
     double torque_sum = 0.0;
     long substep_count = 0;
@@ -55,15 +67,15 @@ double simaxis_step(simaxis_t *s, int n_ticks, double joint_q, double joint_qd) 
         axis_tick(&s->axis, &in, &out);
         s->last_duty = out.duty;
 
-        float applied_duty = (float)cfg->motor_sign * out.duty;
+        float duty_hw = out.duty; /* terminal voltage command; already carries motor_sign once */
 
         float current_sum = 0.0f;
         for (int k = 0; k < SIMAXIS_SUBSTEPS; k++) {
-            float motor_torque = motor_step(&s->motor, applied_duty, omega_motor, (float)SIMAXIS_SUBSTEP_DT);
-            float joint_torque = motor_torque * gear_ratio * gear_efficiency * (float)cfg->motor_sign;
+            float motor_torque = motor_step(&s->motor, duty_hw, omega_electrical, (float)SIMAXIS_SUBSTEP_DT);
+            float joint_torque = motor_sign * motor_torque * gear_ratio * gear_efficiency;
             torque_sum += (double)joint_torque;
             substep_count++;
-            current_sum += motor_sensed_current_ma(&s->motor, applied_duty);
+            current_sum += motor_sensed_current_ma(&s->motor, duty_hw);
         }
         s->current_ma = current_sum / (float)SIMAXIS_SUBSTEPS;
     }
@@ -73,7 +85,7 @@ double simaxis_step(simaxis_t *s, int n_ticks, double joint_q, double joint_qd) 
 }
 
 void simaxis_rx(simaxis_t *s, uint16_t id, uint8_t len, const uint8_t *data) {
-    if (!s || len > 8) return;
+    if (!s || len > 8) return; /* oversized frame: not a valid can_frame_t, silently dropped */
     can_frame_t f = {0};
     f.id = id;
     f.len = len;

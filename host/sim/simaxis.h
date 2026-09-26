@@ -4,6 +4,7 @@
  * See docs/simulator.md for the sign conventions and the per-tick pipeline. */
 #include <stdint.h>
 
+#include "axis/axis_config.h"
 #include "motor_model.h"
 
 typedef struct simaxis simaxis_t;
@@ -12,6 +13,14 @@ typedef struct simaxis simaxis_t;
  * axis/config_table.h). motor describes the physical motor + gearbox for this
  * axis (built by the caller from config/arm.yaml, see robotarm.sim.native). */
 simaxis_t *simaxis_create(uint8_t node_id, const motor_params_t *motor);
+
+/* Same as simaxis_create, but takes the axis_config_t directly instead of
+ * looking it up by node id. Not part of the ctypes API (Python always goes
+ * through simaxis_create by node); exposed for host tests that need axis
+ * configs -- e.g. non-default motor_sign/encoder_sign -- outside the
+ * generated table. simaxis_create is implemented in terms of this. */
+simaxis_t *simaxis_create_with_config(const axis_config_t *cfg, const motor_params_t *motor);
+
 void simaxis_destroy(simaxis_t *s);
 
 /* Advance n 1 kHz ticks. joint_q (rad) / joint_qd (rad/s) come from the physics
