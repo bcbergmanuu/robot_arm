@@ -65,6 +65,9 @@ class ArmClient:
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Set by the background runner when the bus fails under it (broken TCP pipe,
+        # unplugged USB-CAN adapter, ...); the runner then stops (R19). Callers poll alive().
+        self.error: BaseException | None = None
 
     # -- sans-IO core ----------------------------------------------------
 
@@ -136,20 +139,39 @@ class ArmClient:
         self._thread.start()
 
     def _run(self) -> None:
-        while not self._stop_event.is_set():
-            self.poll(time.monotonic())
-            time.sleep(_POLL_PERIOD_S)
+        try:
+            while not self._stop_event.is_set():
+                self.poll(time.monotonic())
+                time.sleep(_POLL_PERIOD_S)
+        except Exception as exc:  # noqa: BLE001 -- any bus failure ends the runner; record it (R19)
+            self.error = exc
+
+    def alive(self) -> bool:
+        """True while the background runner is running and has not hit a bus error.
+
+        False before start(), after close(), and once the bus failed under the
+        runner (see `error`). Without the runner there are no HEARTBEATs, so
+        the axes watchdog-fault on their own within `watchdog_ms`.
+        """
+        return self._thread is not None and self._thread.is_alive() and self.error is None
 
     def close(self) -> None:
         """Stop the background thread (if any) and send a DISABLE broadcast.
 
-        Does not shut the bus down -- the caller owns it.
+        Best effort: if the bus is already gone the DISABLE cannot be sent; the
+        failure is recorded in `error` (if none is yet) instead of raised --
+        the axes then watchdog-fault on their own. Does not shut the bus down
+        -- the caller owns it.
         """
         if self._thread is not None:
             self._stop_event.set()
             self._thread.join(timeout=1.0)
             self._thread = None
-        self.bus.send(protocol.encode_command(protocol.NODE_BROADCAST, protocol.Command.DISABLE))
+        try:
+            self.bus.send(protocol.encode_command(protocol.NODE_BROADCAST, protocol.Command.DISABLE))
+        except (can.CanError, OSError) as exc:
+            if self.error is None:
+                self.error = exc
 
     # -- commands ----------------------------------------------------------
 
