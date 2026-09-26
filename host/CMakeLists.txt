@@ -4,13 +4,16 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 enable_testing()
 
+# All host static libs (including axis_core) must be position-independent so
+# they can later be linked into the SHARED libsimaxis (Task 9) on Linux too.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../components/axis_core axis_core)
 
 add_library(simcore STATIC sim/motor_model.c)
 target_include_directories(simcore PUBLIC sim)
 target_link_libraries(simcore PRIVATE axis_core m)
 target_compile_options(simcore PRIVATE -Wall -Wextra -Werror)
-set_target_properties(simcore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # axis_test(name [extra_libs...]) links axis_core by default; pass extra_libs
 # (e.g. simcore, which already links axis_core transitively) to avoid duplicates.
