@@ -74,23 +74,47 @@ degrees. When an axis has a fault, `| FAULT j2:FOLLOWING` is added to the end.
 | Square | Switch between joint and cartesian mode. Only works while not armed. |
 
 The sticks have a radial deadzone of 0.12 (`deadzone` in `config/teleop.yaml`). The loop runs
-at 50 Hz (`loop_hz`). Cartesian mode arrives with a later task. Until then the arm holds still
-in cartesian mode, even with L1 held.
+at 50 Hz (`loop_hz`).
+
+### Cartesian mode
+
+Press Square (not armed) to switch; the status line starts with `CART`. You can also start in it
+with `robotarm teleop --mode cartesian`. With L1 held you move the gripper tip instead of single
+joints:
+
+| Input | Action |
+|---|---|
+| Left stick up/down | Out / in, horizontally along the direction the hip points |
+| Left stick left/right | Swing the arm about the vertical axis. Left = counter-clockwise seen from above |
+| Right stick up/down | Up / down (z) |
+| Right stick left/right | Roll the gripper (j5). Right = +roll |
+| D-pad up / down | Pitch the gripper (the angle from vertical, q2+q3+q4) +/- |
+| L2 / R2 | Gripper, as in joint mode |
+
+Speeds come from `cartesian_mode` in `config/teleop.yaml`: `linear_speed_m_s` (0.05 m/s) for
+moves and `pitch_speed_rad_s` (0.5 rad/s) for pitch, roll and the swing. R1 slows everything by
+the same 0.3x as in joint mode. When you arm, the target starts at the gripper's current pose,
+so nothing jumps. If you push toward a pose the arm cannot reach, or one that needs a joint past
+its soft limit, the target stops at the last reachable pose and the arm stops there. Pull back
+to move again. Cartesian mode sends position setpoints, which the axes ignore until they are
+homed: if any of j1–j5 is not homed, the arm holds still and the status line shows
+`HOLD: home j1-j5 for cartesian`. Press Triangle (not armed) first.
 
 ## Safety rules
 
 - **Deadman.** You become *armed* only when you *press* L1 while the controller is connected.
   Releasing L1 disarms. Holding L1 while the program starts does not arm you: let go and
   press it again.
-- **Releasing the deadman stops the arm.** When jogging stops (L1 released, controller lost,
-  E-STOP), every jog axis gets a zero-velocity setpoint on the next 3 loops (60 ms), repeated in
+- **Releasing the deadman stops the arm**, in either mode. When jogging stops (L1 released,
+  controller lost, E-STOP), every jog axis gets a zero-velocity setpoint on the next 3 loops (60 ms), repeated in
   case a frame is lost. The axes then decelerate to a stop on their own ramps. The same happens
   when the controller drops out. At all other times while not armed, teleop sends no setpoints,
   so it never interferes with HOME or anything else. Heartbeats alone keep the axis watchdogs fed.
 - **E-STOP (Circle) always works.** It acts while the button is held, not just when you press
   it: E-STOP is sent on every loop while Circle is down, armed or not, including when Circle was
   already held at start-up or through a controller reconnect. It also disarms you, and you
-  cannot arm while it is held. To recover: release Circle, press Options (clear faults), then
+  cannot arm while it is held, and Options, Cross and Triangle are ignored while it is held.
+  To recover: release Circle, press Options (clear faults), then
   Cross (enable), then press L1 again.
 - **Other buttons act on the press.** Holding a button does nothing more. A button held while
   the program starts, or held through a controller reconnect, does nothing until you release it.
@@ -99,7 +123,8 @@ in cartesian mode, even with L1 held.
   and the arm stops. When the controller comes back you must **release and press L1 again**.
   Holding it through the reconnect is not enough.
 - **A hung teleop loop stops the arm.** Heartbeats are only sent while the teleop loop is alive:
-  it checks in on every iteration, and the check-in expires after 100 ms. If the loop stalls
+  it checks in on every iteration, and the check-in expires after 100 ms (or two loop periods,
+  if `loop_hz` is below 20). If the loop stalls
   (a stuck gamepad driver, a paused terminal, a bug), the heartbeats stop and every axis
   watchdog-faults 200 ms later. The last jog command does not keep running.
 - **Losing the bus** (sim closed, USB-CAN adapter unplugged): teleop prints

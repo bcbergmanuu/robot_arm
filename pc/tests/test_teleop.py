@@ -15,6 +15,7 @@ from robotarm import protocol as p
 from robotarm.config import load_arm_config
 from robotarm.master.arm_client import ArmClient
 from robotarm.master.gamepad import FakeGamepad
+from robotarm.master.kinematics import Kinematics, Pose
 from robotarm.master import teleop as teleop_mod
 from robotarm.master.teleop import JointBinding, Mode, Teleop, load_teleop_config
 from robotarm.sim.harness import run_lockstep
@@ -276,19 +277,6 @@ def test_toggle_mode_only_when_not_armed(rig):
     press(rig.pad, "square")
     rig.drive(0.04)
     assert rig.teleop.mode is Mode.CARTESIAN  # ignored while armed
-
-
-def test_cartesian_mode_does_not_move_yet(rig):
-    press(rig.pad, "square")
-    rig.drive(0.04)
-    release(rig.pad, "square")
-    rig.drive(0.04)
-    assert rig.teleop.mode is Mode.CARTESIAN
-    q0 = rig.joint("shoulder").position_rad
-    press(rig.pad, "l1")
-    rig.pad.set(ly=1.0)
-    rig.drive(1.0)
-    assert abs(math.degrees(rig.joint("shoulder").position_rad - q0)) < 0.2
 
 
 def test_estop_then_clear_and_enable_buttons(rig):
@@ -731,3 +719,249 @@ def test_arm_client_runner_records_internal_error(cfg):
         time.sleep(0.01)
     assert isinstance(client.error, ZeroDivisionError)
     client.close()
+
+
+# --- Task 17: Cartesian jog mode -----------------------------------------------------
+
+# A bent pose well inside every soft limit: gripper tilted forward and down (pitch 150 deg).
+BENT_Q = {"j1": math.radians(20), "j2": math.radians(20), "j3": math.radians(70), "j4": math.radians(60),
+          "j5": 0.0}
+
+
+@pytest.fixture
+def cart_rig(rig):
+    """The homed rig moved to BENT_Q, switched to CARTESIAN (not armed)."""
+    for joint, q in BENT_Q.items():
+        rig.client.set_position(rig.client.cfg.axis_by_name(_name(rig, joint)).node, q)
+    rig.drive(3.0)
+    press(rig.pad, "square")
+    rig.drive(0.04)
+    release(rig.pad, "square")
+    rig.drive(0.04)
+    assert rig.teleop.mode is Mode.CARTESIAN and not rig.teleop.armed
+    return rig
+
+
+def _name(rig, joint):
+    return next(a.name for a in rig.client.cfg.axes if a.joint == joint)
+
+
+def _tcp(rig):
+    return rig.world.data.site("tcp").xpos.copy()
+
+
+def _measured_q(rig):
+    return [rig.client.joints[a.node].position_rad for a in rig.client.cfg.axes[:5]]
+
+
+def _record(client, name):
+    """Wrap client.<name> so the test sees every call's args (the real method still runs)."""
+    sent = []
+    real = getattr(client, name)
+
+    def spy(*args):
+        sent.append(args)
+        real(*args)
+
+    setattr(client, name, spy)
+    return sent
+
+
+def test_cartesian_ry_raises_tcp_z_straight_up(cart_rig):
+    rig = cart_rig
+    p0 = _tcp(rig)
+    press(rig.pad, "l1")
+    rig.pad.set(ry=1.0)
+    rig.drive(1.0)
+    assert rig.teleop.armed
+    p1 = _tcp(rig)
+    assert p1[2] - p0[2] > 0.02
+    assert math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < 0.005
+    assert not rig.client.any_fault()
+
+
+def test_cartesian_arming_holds_current_pose(cart_rig):
+    """Arming with the sticks centred initialises the target from FK of the measured joints: nothing moves."""
+    rig = cart_rig
+    p0 = _tcp(rig)
+    sent = _record(rig.client, "set_position")
+    press(rig.pad, "l1")
+    rig.drive(0.5)
+    assert len(sent) == 25 * 5  # j1..j5 every update
+    assert float(sum((_tcp(rig) - p0) ** 2)) ** 0.5 < 0.001
+
+
+def test_cartesian_radial_outward_stops_at_workspace_edge(cart_rig):
+    rig = cart_rig
+    kin = Kinematics(rig.client.cfg)
+    start = kin.forward(_measured_q(rig))
+    sent = _record(rig.client, "set_position")
+    press(rig.pad, "l1")
+    rig.pad.set(ly=1.0)
+    rig.drive(10.0)
+    assert rig.teleop.armed
+    assert not rig.client.any_fault()
+    assert all(abs(math.degrees(js.velocity_rad_s)) < 1.0 for js in rig.client.joints.values())
+
+    q = _measured_q(rig)
+    end = kin.forward(q)
+    r0, r1 = math.hypot(start.x, start.y), math.hypot(end.x, end.y)
+    assert r1 - r0 > 0.05  # it really moved outward...
+    assert math.atan2(end.y, end.x) == pytest.approx(BENT_Q["j1"], abs=math.radians(1))  # ...along q1
+    assert end.z == pytest.approx(start.z, abs=0.005) and end.pitch == pytest.approx(start.pitch, abs=0.02)
+    # ...and stopped at the edge: 1 cm further out is not reachable.
+    further = Pose(end.x * (r1 + 0.01) / r1, end.y * (r1 + 0.01) / r1, end.z, end.pitch, end.roll)
+    assert kin.inverse(further, q) is None
+    # Out of reach, the last reachable target is re-sent unchanged.
+    last = sent[-10:]
+    assert len({args for args in last}) == 5
+
+
+def test_cartesian_rotates_about_z_and_rolls(cart_rig):
+    rig = cart_rig
+    kin = Kinematics(rig.client.cfg)
+    start = kin.forward(_measured_q(rig))
+    press(rig.pad, "l1")
+    rig.pad.set(lx=-1.0, rx=1.0)  # stick left: counter-clockwise from above (+q1, as in joint mode)
+    rig.drive(1.0)
+    end = kin.forward(_measured_q(rig))
+    assert math.atan2(end.y, end.x) - math.atan2(start.y, start.x) > math.radians(10)
+    assert math.hypot(end.x, end.y) == pytest.approx(math.hypot(start.x, start.y), abs=0.005)
+    assert end.z == pytest.approx(start.z, abs=0.005)
+    assert end.roll - start.roll > math.radians(10)
+
+
+def test_cartesian_dpad_pitches_gripper(cart_rig):
+    rig = cart_rig
+    kin = Kinematics(rig.client.cfg)
+    start = kin.forward(_measured_q(rig))
+    press(rig.pad, "l1")
+    rig.drive(0.04)
+    press(rig.pad, "dpad_down")
+    rig.drive(1.0)
+    release(rig.pad, "dpad_down")
+    rig.drive(0.5)  # the joints lag a little mid-pitch; the settled TCP is where it started
+    end = kin.forward(_measured_q(rig))
+    assert start.pitch - end.pitch > math.radians(10)
+    assert (end.x, end.y, end.z) == pytest.approx((start.x, start.y, start.z), abs=0.005)
+
+
+def test_cartesian_slow_scales_speed(cart_rig):
+    rig = cart_rig
+    kin = Kinematics(rig.client.cfg)
+    press(rig.pad, "l1", "r1")
+    rig.pad.set(ry=1.0)
+    z0 = kin.forward(_measured_q(rig)).z
+    rig.drive(1.0)
+    slow_dz = kin.forward(_measured_q(rig)).z - z0
+    ratio = rig.teleop.cfg.speed_scale["slow"] / rig.teleop.cfg.speed_scale["normal"]
+    expected = rig.teleop.cfg.cartesian_mode["linear_speed_m_s"] * ratio
+    assert slow_dz == pytest.approx(expected, rel=0.3)
+
+
+def test_cartesian_triggers_drive_gripper(cart_rig):
+    rig = cart_rig
+    q0 = rig.joint("gripper").position_rad
+    press(rig.pad, "l1")
+    rig.pad.set(r2=1.0)
+    rig.drive(0.3)
+    assert rig.joint("gripper").position_rad < q0 - math.radians(2)
+
+
+def test_cartesian_disarm_sends_zeros_then_silence(cart_rig):
+    """R21 holds in CARTESIAN too: zero velocity to every jog axis for 3 updates, then nothing."""
+    rig = cart_rig
+    press(rig.pad, "l1")
+    rig.pad.set(ry=1.0)
+    rig.drive(0.3)
+    positions = _record(rig.client, "set_position")
+    velocities = _record_velocity_setpoints(rig.client)
+    release(rig.pad, "l1")
+    rig.drive(0.3)
+    assert positions == []
+    n_jog = len(rig.teleop.cfg.joint_mode)
+    assert len(velocities) == 3 * n_jog and all(v == 0.0 for _n, v in velocities)
+    rig.drive(0.5)
+    assert all(abs(math.degrees(js.velocity_rad_s)) < 1.0 for js in rig.client.joints.values())
+
+
+def test_cartesian_holds_while_unhomed(cfg, tcfg):
+    world = SimWorld(cfg, initial_q=near_home_start(cfg))
+    bus = SimBus(world)
+    try:
+        client = make_client(bus, cfg)
+        pad = FakeGamepad()
+        teleop = Teleop(client, cfg, tcfg)
+        teleop.mode = Mode.CARTESIAN
+        r = Rig(world, bus, client, teleop, pad)
+        press(pad, "cross")  # enable (not homed)
+        r.drive(0.1)
+        release(pad, "cross")
+        r.drive(0.1)
+        positions = _record(client, "set_position")
+        press(pad, "l1")
+        pad.set(ry=1.0)
+        r.drive(0.5)
+        assert teleop.armed
+        assert positions == []
+        assert "HOLD" in teleop.status_line() and "\n" not in teleop.status_line()
+    finally:
+        bus.shutdown()
+        world.close()
+
+
+# --- Task 16 review carry-overs ----------------------------------------------------------
+
+
+def test_estop_held_blocks_clear_enable_home_in_same_update(rig):
+    calls = {name: _spy(rig.client, name) for name in ("clear_faults", "enable", "home", "estop")}
+    press(rig.pad, "circle", "options", "cross", "triangle")
+    rig.drive(0.02)  # one update
+    assert calls["estop"] and not calls["clear_faults"] and not calls["enable"] and not calls["home"]
+    release(rig.pad, "circle")  # the other buttons stay held: no new edge, still nothing
+    rig.drive(0.1)
+    assert not calls["clear_faults"] and not calls["enable"] and not calls["home"]
+
+
+@pytest.mark.parametrize(("loop_hz", "expected"), [(50, 0.1), (100, 0.1), (10, 0.2), (4, 0.5)])
+def test_keepalive_timeout_scales_with_loop_rate(loop_hz, expected):
+    assert teleop_mod.keepalive_timeout(loop_hz) == pytest.approx(expected)
+
+
+def test_run_teleop_builds_client_with_loop_rate_keepalive(monkeypatch, tcfg):
+    seen = []
+    real_init = ArmClient.__init__
+
+    def init(self, bus, cfg, *args, **kwargs):
+        seen.append(kwargs.get("keepalive_timeout"))
+        real_init(self, bus, cfg, *args, **kwargs)
+
+    class StopPad:
+        def poll(self):
+            raise RuntimeError("done")
+
+    monkeypatch.setattr(ArmClient, "__init__", init)
+    monkeypatch.setattr(teleop_mod, "load_teleop_config", lambda path=None: dataclasses.replace(tcfg, loop_hz=10.0))
+    assert teleop_mod.run_teleop("sim", "joint", gamepad=StopPad()) == 2
+    assert seen == [pytest.approx(0.2)]
+
+
+@pytest.mark.parametrize("body", ["buttons: l1\n", "buttons: {deadman: l1}\njoint_mode: [j1, j2]\n"])
+def test_run_teleop_malformed_yaml_is_config_error(monkeypatch, capsys, tmp_path, body):
+    """A structurally malformed file (a string/list where a mapping belongs) is a config error, not a crash."""
+    bad = tmp_path / "teleop.yaml"
+    bad.write_text("deadzone: 0.1\nloop_hz: 50\nspeed_scale: {normal: 0.5, slow: 0.1}\n" + body)
+    real = teleop_mod.load_teleop_config
+    monkeypatch.setattr(teleop_mod, "load_teleop_config", lambda path=None: real(bad))
+    assert teleop_mod.run_teleop("sim", "joint", gamepad=FakeGamepad()) == 2
+    _one_error_line(capsys, "error: config: ")
+
+
+@pytest.mark.parametrize("cart", ["", "cartesian_mode: {linear_speed_m_s: 0.05}\n",
+                                  "cartesian_mode: {linear_speed_m_s: 0.05, pitch_speed_rad_s: 0}\n",
+                                  "cartesian_mode: [1, 2]\n"])
+def test_load_teleop_config_rejects_bad_cartesian_mode(tmp_path, cart):
+    bad = tmp_path / "teleop.yaml"
+    bad.write_text("deadzone: 0.1\nloop_hz: 50\nspeed_scale: {normal: 0.5, slow: 0.1}\nbuttons: {deadman: l1}\n" + cart)
+    with pytest.raises(ValueError, match="cartesian_mode"):
+        load_teleop_config(bad)
