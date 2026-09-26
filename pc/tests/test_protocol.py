@@ -33,3 +33,20 @@ def test_decode_rejects_bad_length_and_unknown_type():
 @pytest.mark.parametrize("value", [-(2**31), -1, 0, 1, 2**31 - 1])
 def test_setpoint_roundtrip(value):
     assert p.decode(p.encode_setpoint(5, p.SetpointKind.POSITION, value)) == p.Setpoint(5, p.SetpointKind.POSITION, value)
+
+
+def test_decode_rejects_out_of_range_enum_byte():
+    """R6: correctly-sized frames with an out-of-range enum byte decode to None, not a raised ValueError --
+    ArmClient consumes live bus traffic and must not crash on a garbage/corrupt frame."""
+    bad_command = can.Message(arbitration_id=p.make_id(p.MsgType.COMMAND, 1), data=bytes([0xFF]), is_extended_id=False)
+    assert p.decode(bad_command) is None
+
+    bad_setpoint = can.Message(
+        arbitration_id=p.make_id(p.MsgType.SETPOINT, 1), data=bytes([0xFF, 0, 0, 0, 0]), is_extended_id=False
+    )
+    assert p.decode(bad_setpoint) is None
+
+    bad_status = can.Message(
+        arbitration_id=p.make_id(p.MsgType.STATUS, 1), data=bytes([0, 0, 0, 0, 0xFF, 0, 0]), is_extended_id=False
+    )
+    assert p.decode(bad_status) is None

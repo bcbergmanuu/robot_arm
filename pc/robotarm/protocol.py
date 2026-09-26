@@ -164,19 +164,25 @@ def decode(msg: can.Message) -> Estop | Heartbeat | CommandMsg | Setpoint | Stat
     node = _node_of(msg.arbitration_id)
     data = bytes(msg.data)
 
-    if type_ == MsgType.ESTOP and len(data) == 0:
-        return Estop()
-    if type_ == MsgType.HEARTBEAT and len(data) == 1:
-        return Heartbeat(seq=data[0])
-    if type_ == MsgType.COMMAND and len(data) == 1:
-        return CommandMsg(node=node, command=Command(data[0]))
-    if type_ == MsgType.SETPOINT and len(data) == _SETPOINT_FMT.size:
-        kind, value = _SETPOINT_FMT.unpack(data)
-        return Setpoint(node=node, kind=SetpointKind(kind), value=value)
-    if type_ == MsgType.STATUS and len(data) == _STATUS_FMT.size:
-        pos, state, faults, flags = _STATUS_FMT.unpack(data)
-        return Status(node=node, position=pos, state=AxisState(state), faults=Fault(faults), homed=bool(flags & 0x01))
-    if type_ == MsgType.TELEMETRY and len(data) == _TELEMETRY_FMT.size:
-        vel, current_ma = _TELEMETRY_FMT.unpack(data)
-        return Telemetry(node=node, velocity=vel, current_ma=current_ma)
+    try:
+        if type_ == MsgType.ESTOP and len(data) == 0:
+            return Estop()
+        if type_ == MsgType.HEARTBEAT and len(data) == 1:
+            return Heartbeat(seq=data[0])
+        if type_ == MsgType.COMMAND and len(data) == 1:
+            return CommandMsg(node=node, command=Command(data[0]))
+        if type_ == MsgType.SETPOINT and len(data) == _SETPOINT_FMT.size:
+            kind, value = _SETPOINT_FMT.unpack(data)
+            return Setpoint(node=node, kind=SetpointKind(kind), value=value)
+        if type_ == MsgType.STATUS and len(data) == _STATUS_FMT.size:
+            pos, state, faults, flags = _STATUS_FMT.unpack(data)
+            return Status(
+                node=node, position=pos, state=AxisState(state), faults=Fault(faults), homed=bool(flags & 0x01)
+            )
+        if type_ == MsgType.TELEMETRY and len(data) == _TELEMETRY_FMT.size:
+            vel, current_ma = _TELEMETRY_FMT.unpack(data)
+            return Telemetry(node=node, velocity=vel, current_ma=current_ma)
+    except ValueError:
+        # Correctly-sized frame but an enum byte out of range (garbage/corrupt traffic).
+        return None
     return None
