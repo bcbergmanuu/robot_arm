@@ -2,33 +2,41 @@
 
 ## Running it
 
-`make sim` (equivalently `uv run mjpython -m robotarm sim`) starts the real-time simulator
-server with its MuJoCo viewer, listening for a master on `tcp://127.0.0.1:29536`. In a second
-terminal, run the teleop master or `uv run robotarm monitor --bus tcp://127.0.0.1:29536` to
-watch axis state/position/faults.
+`make sim` starts the real-time simulator server with its MuJoCo viewer, listening for a master
+on `tcp://127.0.0.1:29536`. In a second terminal, run the teleop master or `uv run robotarm
+monitor --bus tcp://127.0.0.1:29536` to watch axis state/position/faults.
 
 ```
-uv run mjpython -m robotarm sim                       # with viewer (macOS: needs mjpython, see below)
-uv run robotarm sim --no-viewer                        # headless, any platform, plain `python`/`uv run` is fine
+make sim                                                # with viewer (via scripts/sim.sh, see below)
+uv run robotarm sim --no-viewer                         # headless, any platform, plain `python`/`uv run` is fine
 uv run robotarm sim --no-viewer --host 0.0.0.0 --port 29536
 uv run robotarm sim --start zero                        # start every joint at q=0 instead of 5° off its home stop
 ```
 
-**macOS + viewer needs `mjpython`.** MuJoCo's passive viewer (`mujoco.viewer.launch_passive`)
-opens a Cocoa window, which on macOS must run on the process's real main thread; `mjpython`
-(installed alongside the `mujoco` package) re-execs the interpreter to arrange that. Running
-`robotarm sim` under plain `python`/`uv run` on macOS with a viewer fails fast:
+**macOS + viewer needs `mjpython`, and `mjpython` needs help finding libpython.** MuJoCo's
+passive viewer (`mujoco.viewer.launch_passive`) opens a Cocoa window, which on macOS must run on
+the process's real main thread; `mjpython` (installed alongside the `mujoco` package) re-execs
+the interpreter to arrange that. Running `robotarm sim` under plain `python`/`uv run` on macOS
+with a viewer fails fast:
 
 ```
 $ uv run robotarm sim
-run with: uv run mjpython -m robotarm sim
+run with: make sim  (or: uv run mjpython -m robotarm sim)
 $ echo $?
 2
 ```
 
 (detected by checking for the `MJPYTHON_BIN` environment variable the `mjpython` launcher sets
-before it execve's into the real interpreter). Pass `--no-viewer` to skip the viewer and run
-under plain `python` instead — this is what CI and `pc/tests/test_tcp_bus.py` do.
+on itself before it execve's into the real interpreter). Separately, `mjpython`'s native binary
+dlopens the interpreter's `libpython`, and with `uv`'s standalone CPython that library lives
+wherever `sysconfig.get_config_var("LIBDIR")` says (e.g.
+`~/.local/share/uv/python/cpython-3.12.12-macos-aarch64-none/lib`), not next to the executable —
+without `DYLD_LIBRARY_PATH` pointed at it, `mjpython` fails to start at all. `scripts/sim.sh`
+(what `make sim` runs) sets that up on macOS and just runs plain `python -m robotarm sim` on
+Linux, where none of this applies. Pass `--no-viewer` to skip the viewer and run under plain
+`python` instead — this is what CI and `pc/tests/test_tcp_bus.py` do, and also the first thing to
+try **if the viewer window itself crashes** on your machine (this hasn't been exercised on every
+platform).
 
 `uv run robotarm monitor --bus URL` connects to any bus (see `robotarm.bus.open_bus`: `tcp://host:port`
 for a running `robotarm sim`, `sim` for a disposable in-process one, or a real interface —
@@ -42,7 +50,7 @@ one line per axis, once a second, until Ctrl-C.
    ┌──────────────────────────────────────────┐         ┌───────────────────────────┐
    │  MuJoCo viewer  <── handle.sync() ~60 Hz  │         │  ArmClient / Teleop /     │
    │        ▲                                  │         │  `robotarm monitor`       │
-   │        │ (under world._lock)               │         └─────────────┬─────────────┘
+   │        │ (under world._lock + handle.lock)│         └─────────────┬─────────────┘
    │  ┌─────┴──────┐   deliver()/step(1ms)  ┌───┴────┐   13-byte frames  │
    │  │  SimWorld  │◄───────────────────────│SimServer│◄══════TCP═══════►│  TcpBus
    │  │ (MuJoCo +  │   take_outgoing()      │(accept  │                 │
@@ -69,11 +77,19 @@ one line per axis, once a second, until Ctrl-C.
   batch of frames out to every connected client). This is what lets a master and a `robotarm
   monitor` connect to the same `robotarm sim` process at once.
 - **`run_realtime(world, server, viewer, stop_event)`** is the loop that ties the two together:
-  each iteration it works out how many 1 ms steps wall-clock time now calls for (capped at 50
-  per iteration, so a stall never blocks it from checking `stop_event` or resyncing the viewer
-  for long), delivers `server.take_inbound()` before each individual step, then broadcasts
-  `world.take_outgoing()`. If a viewer is attached it calls `handle.sync()` at ~60 Hz, holding
-  `world._lock` so the viewer never reads qpos/qvel mid-step.
+  each iteration it works out how many 1 ms steps wall-clock time now calls for (`robotarm.sim.
+  pacing.steps_to_catch_up`, capped at `DEFAULT_CATCH_UP_CAP` = 50 per iteration, so a stall never
+  blocks it from checking `stop_event` or resyncing the viewer for long), delivers
+  `server.take_inbound()` before each individual step, then broadcasts `world.take_outgoing()`.
+  When a viewer is attached, every `world.step(1)` in that batch runs inside `with handle.lock():`
+  — MuJoCo's passive viewer renders (and handles perturbations) from the same `mjData` on its own
+  thread, and `handle.lock()` is the mutex it actually respects, so stepping physics outside it
+  would race the viewer's reads/writes. `handle.sync()` (called separately, at ~60 Hz) locks
+  internally too; `run_realtime` additionally takes `world._lock` around it so a concurrent
+  `world.step` from another caller can't be mutating qpos/qvel mid-sync either.
+  `robotarm.sim.pacing` also backs the simpler background thread that
+  `robotarm.bus.open_bus("sim")` starts (no server, no viewer, so no locking beyond `SimWorld`'s
+  own) — the two share the catch-up arithmetic, not the loop body.
 - **`TcpBus`** (`pc/robotarm/transport/tcp_bus.py`) is the client side: a `can.BusABC` that
   connects a plain TCP socket to a `SimServer` and speaks the same 13-byte frame format
   (`struct.pack("<IB8s", arbitration_id, dlc, data.ljust(8, b"\0"))`) in both directions. A

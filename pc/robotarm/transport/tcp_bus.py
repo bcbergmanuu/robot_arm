@@ -51,7 +51,9 @@ class TcpBus(can.BusABC):
     """Connects to a robotarm.sim.server.SimServer and exchanges 13-byte CAN frames."""
 
     def __init__(self, channel: str = "127.0.0.1:29536", connect_timeout: float = 2.0, **kwargs) -> None:
-        host, _, port_str = channel.rpartition(":")
+        host, sep, port_str = channel.rpartition(":")
+        if not sep or not port_str.isdigit():
+            raise ValueError(f"TcpBus channel must be 'host:port', got {channel!r}")
         port = int(port_str)
         super().__init__(channel=channel, **kwargs)
         self.channel_info = f"TcpBus({channel})"

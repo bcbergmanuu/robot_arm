@@ -29,12 +29,12 @@ import can
 
 from robotarm import protocol as p
 from robotarm.config import ArmConfig, load_arm_config
+from robotarm.sim.pacing import DEFAULT_CATCH_UP_CAP, steps_to_catch_up
 from robotarm.sim.world import SimBus, SimWorld
 from robotarm.transport.tcp_bus import SimNotRunningError, TcpBus
 
 _REAL_INTERFACES = {"slcan", "gs_usb", "socketcan", "pcan"}
 _REAL_BITRATE = 1_000_000
-_MAX_STEPS_PER_ITERATION = 50
 _PRINT_INTERVAL_S = 1.0
 
 
@@ -65,8 +65,7 @@ class _RealtimeSimBus(SimBus):
         wall0 = time.monotonic()
         sim0 = self._world.time
         while not self._stop.is_set():
-            behind_ms = round((time.monotonic() - wall0 - (self._world.time - sim0)) * 1000)
-            steps = max(0, min(behind_ms, _MAX_STEPS_PER_ITERATION))
+            steps = steps_to_catch_up(wall0, sim0, time.monotonic(), self._world.time, DEFAULT_CATCH_UP_CAP)
             if steps:
                 self._world.step(steps)
                 self.pump()

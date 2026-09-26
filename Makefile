@@ -19,7 +19,7 @@ firmware:
 	scripts/idf.sh build
 
 sim:
-	uv run mjpython -m robotarm sim
+	scripts/sim.sh
 
 teleop:
 	uv run robotarm teleop --bus tcp://127.0.0.1:29536

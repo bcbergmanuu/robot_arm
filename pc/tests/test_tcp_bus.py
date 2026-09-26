@@ -61,3 +61,12 @@ def test_disconnecting_master_trips_watchdog(running_sim):
         assert st.state == p.AxisState.FAULT and p.Fault.WATCHDOG in st.faults
     finally:
         bus2.shutdown()
+
+
+# --- Fix round 1 additions (controller findings) ---
+
+
+def test_malformed_channel_raises_clear_value_error():
+    for bad_channel in ("no-colon-here", "host:notaport", "host:"):
+        with pytest.raises(ValueError, match="host:port"):
+            TcpBus(bad_channel)

@@ -16,6 +16,7 @@ world at wall-clock speed and, if given a viewer handle, syncs it at ~60 Hz.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import math
 import os
@@ -29,12 +30,12 @@ import time
 import can
 
 from robotarm.config import load_arm_config
+from robotarm.sim.pacing import DEFAULT_CATCH_UP_CAP, ms_behind, steps_to_catch_up
 from robotarm.sim.world import SimWorld
 from robotarm.transport.tcp_bus import FRAME_SIZE, decode_frame, encode_frame, recv_exact
 
 logger = logging.getLogger(__name__)
 
-_MAX_STEPS_PER_ITERATION = 50
 _VIEWER_SYNC_HZ = 60.0
 _MJPYTHON_ENV_VAR = "MJPYTHON_BIN"  # set by the mjpython launcher (mujoco package) on execve
 
@@ -62,7 +63,9 @@ class SimServer:
         while True:
             try:
                 conn, _addr = self._sock.accept()
-            except OSError:
+            except OSError as exc:
+                if not self._closed:
+                    logger.warning("SimServer accept() failed: %s", exc, exc_info=True)
                 return
             with self._clients_lock:
                 self._clients.append(conn)
@@ -161,17 +164,23 @@ def run_realtime(world: SimWorld, server: SimServer, viewer: bool, stop_event: t
                 break
 
             now = time.monotonic()
-            behind_ms = round((now - wall0 - (world.time - sim0)) * 1000)
-            steps = max(0, min(behind_ms, _MAX_STEPS_PER_ITERATION))
+            sim_time = world.time
+            steps = steps_to_catch_up(wall0, sim0, now, sim_time, DEFAULT_CATCH_UP_CAP)
+            behind_ms = ms_behind(wall0, sim0, now, sim_time)
 
-            for _ in range(steps):
-                for msg in server.take_inbound():
-                    world.deliver(msg)
-                world.step(1)
+            # mj_step (inside world.step) mutates mjData; the passive viewer's own thread
+            # reads/writes it too (rendering, perturbations), so every step -- like every
+            # sync -- must run under the viewer's own lock, not just world._lock.
+            step_guard = handle.lock() if handle is not None else contextlib.nullcontext()
+            with step_guard:
+                for _ in range(steps):
+                    for msg in server.take_inbound():
+                        world.deliver(msg)
+                    world.step(1)
             if steps:
                 server.broadcast(world.take_outgoing())
 
-            if behind_ms > _MAX_STEPS_PER_ITERATION and now - last_warn >= 1.0:
+            if behind_ms > DEFAULT_CATCH_UP_CAP and now - last_warn >= 1.0:
                 logger.warning("sim is %d ms behind real time", behind_ms)
                 last_warn = now
 
@@ -201,7 +210,7 @@ def _initial_positions(cfg, start: str) -> dict[str, float] | None:
 
 def _run(args: argparse.Namespace) -> int:
     if args.viewer and sys.platform == "darwin" and not _running_under_mjpython():
-        print("run with: uv run mjpython -m robotarm sim", file=sys.stderr)
+        print("run with: make sim  (or: uv run mjpython -m robotarm sim)", file=sys.stderr)
         return 2
 
     logging.basicConfig(level=logging.INFO)
