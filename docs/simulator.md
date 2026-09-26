@@ -1,5 +1,106 @@
 # Simulator
 
+## Running it
+
+`make sim` (equivalently `uv run mjpython -m robotarm sim`) starts the real-time simulator
+server with its MuJoCo viewer, listening for a master on `tcp://127.0.0.1:29536`. In a second
+terminal, run the teleop master or `uv run robotarm monitor --bus tcp://127.0.0.1:29536` to
+watch axis state/position/faults.
+
+```
+uv run mjpython -m robotarm sim                       # with viewer (macOS: needs mjpython, see below)
+uv run robotarm sim --no-viewer                        # headless, any platform, plain `python`/`uv run` is fine
+uv run robotarm sim --no-viewer --host 0.0.0.0 --port 29536
+uv run robotarm sim --start zero                        # start every joint at q=0 instead of 5° off its home stop
+```
+
+**macOS + viewer needs `mjpython`.** MuJoCo's passive viewer (`mujoco.viewer.launch_passive`)
+opens a Cocoa window, which on macOS must run on the process's real main thread; `mjpython`
+(installed alongside the `mujoco` package) re-execs the interpreter to arrange that. Running
+`robotarm sim` under plain `python`/`uv run` on macOS with a viewer fails fast:
+
+```
+$ uv run robotarm sim
+run with: uv run mjpython -m robotarm sim
+$ echo $?
+2
+```
+
+(detected by checking for the `MJPYTHON_BIN` environment variable the `mjpython` launcher sets
+before it execve's into the real interpreter). Pass `--no-viewer` to skip the viewer and run
+under plain `python` instead — this is what CI and `pc/tests/test_tcp_bus.py` do.
+
+`uv run robotarm monitor --bus URL` connects to any bus (see `robotarm.bus.open_bus`: `tcp://host:port`
+for a running `robotarm sim`, `sim` for a disposable in-process one, or a real interface —
+`slcan:/dev/tty...`, `gs_usb:0`, `socketcan:can0`, `pcan:PCAN_USBBUS1` — for the robot) and prints
+one line per axis, once a second, until Ctrl-C.
+
+## Architecture: SimWorld, SimServer, TcpBus
+
+```
+        real-time process ("robotarm sim")                     master process
+   ┌──────────────────────────────────────────┐         ┌───────────────────────────┐
+   │  MuJoCo viewer  <── handle.sync() ~60 Hz  │         │  ArmClient / Teleop /     │
+   │        ▲                                  │         │  `robotarm monitor`       │
+   │        │ (under world._lock)               │         └─────────────┬─────────────┘
+   │  ┌─────┴──────┐   deliver()/step(1ms)  ┌───┴────┐   13-byte frames  │
+   │  │  SimWorld  │◄───────────────────────│SimServer│◄══════TCP═══════►│  TcpBus
+   │  │ (MuJoCo +  │   take_outgoing()      │(accept  │                 │
+   │  │ 6×NativeAxis)──────────────────────►│+ per-   │                 │
+   │  └────────────┘                        │client   │                 │
+   │        ▲ run_realtime() paces all of    │reader   │                 │
+   │        │ this against wall-clock time   │threads) │                 │
+   └────────┴─────────────────────────────────┴────┴────┘                 │
+                                                        (any number of clients,
+                                                         e.g. master + monitor,
+                                                         all see the same broadcasts)
+```
+
+- **`SimWorld`** (`pc/robotarm/sim/world.py`, Task 12) owns the MuJoCo model/data and six
+  `NativeAxis` (`libsimaxis`, i.e. real `axis_core` C code) instances, one per joint. `step(n_ms)`
+  advances n milliseconds; `deliver(msg)` feeds a CAN frame to every simulated node; frames the
+  nodes transmit collect in an internal buffer, drained by `take_outgoing()`. It has its own
+  `RLock` so it's safe to call from more than one thread (the real-time loop and, when a viewer
+  is attached, the sync callback).
+- **`SimServer`** (`pc/robotarm/sim/server.py`, this task) is the TCP front end: it accepts any
+  number of client connections, one reader thread per client, and merges every client's inbound
+  frames into a single queue (`take_inbound()`) that only ever reaches the world — clients never
+  see each other's raw frames, only what the world itself broadcasts (`broadcast(msgs)` fans a
+  batch of frames out to every connected client). This is what lets a master and a `robotarm
+  monitor` connect to the same `robotarm sim` process at once.
+- **`run_realtime(world, server, viewer, stop_event)`** is the loop that ties the two together:
+  each iteration it works out how many 1 ms steps wall-clock time now calls for (capped at 50
+  per iteration, so a stall never blocks it from checking `stop_event` or resyncing the viewer
+  for long), delivers `server.take_inbound()` before each individual step, then broadcasts
+  `world.take_outgoing()`. If a viewer is attached it calls `handle.sync()` at ~60 Hz, holding
+  `world._lock` so the viewer never reads qpos/qvel mid-step.
+- **`TcpBus`** (`pc/robotarm/transport/tcp_bus.py`) is the client side: a `can.BusABC` that
+  connects a plain TCP socket to a `SimServer` and speaks the same 13-byte frame format
+  (`struct.pack("<IB8s", arbitration_id, dlc, data.ljust(8, b"\0"))`) in both directions. A
+  background reader thread turns the stream back into framed `can.Message`s so `recv()` can
+  block with a timeout like any other python-can bus. Failing to connect raises
+  `SimNotRunningError` (`"no simulator at host:port -- start it with `make sim`"`), which the
+  `sim`/`monitor` CLI commands turn into `error: ...` on stderr and exit code 2.
+
+## Time handling: lockstep vs real-time
+
+Two different drivers advance the same `SimWorld`, for two different purposes:
+
+- **Lockstep** (`pc/robotarm/sim/harness.py:run_lockstep`, Task 12): steps the world exactly one
+  millisecond at a time, calling an `on_ms` callback after each step. No wall clock involved —
+  a 3-second test runs however fast Python and MuJoCo allow. Used by `pc/tests/test_world.py`,
+  `robotarm tune`/`stepfit` and anywhere a test needs deterministic, repeatable timing.
+- **Real-time** (`pc/robotarm/sim/server.py:run_realtime`, and the equivalent background thread
+  `robotarm.bus.open_bus("sim")` starts for an in-process bus): paces the world against
+  `time.monotonic()` so 1 simulated second takes ~1 wall-clock second, which is what a human
+  driving a gamepad or a real CAN master expects. It steps in bursts of up to 50 ms to catch up
+  after a stall (e.g. a slow viewer frame) without ever running unboundedly far ahead, and logs
+  a warning (at most once a second) if it can't keep up.
+
+The simulated encoders are incremental like the real boards: each reads 0 at the first
+simulated tick wherever the joint physically is, so positions only become absolute after homing
+— true whichever driver is stepping the world.
+
 ## Motor model validation
 
 The simulator is only as trustworthy as its motor model, so the model is checked against the
