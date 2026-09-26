@@ -119,17 +119,57 @@ static void queue_status(axis_t *a) {
     queue_tx(a, &f);
 }
 
-/* DUTY is implemented here; VELOCITY/POSITION cascades land in Task 6. */
+static float signf(float v) { return (v > 0.0f) ? 1.0f : ((v < 0.0f) ? -1.0f : 0.0f); }
+
 static void run_ready(axis_t *a) {
+    const axis_config_t *cfg = a->cfg;
+    float v_des = 0.0f;
+
     switch (a->sp_kind) {
         case PROTO_SP_DUTY:
-            a->duty = clampf(a->target, -a->cfg->max_duty, a->cfg->max_duty);
+            a->duty = clampf(a->target, -cfg->max_duty, cfg->max_duty);
+            return;
+
+        case PROTO_SP_POSITION: {
+            float goal = clampf(a->target, (float)cfg->pos_min, (float)cfg->pos_max);
+            float dist = goal - a->sp_pos;
+            v_des = signf(dist) * fminf(cfg->max_vel, sqrtf(2.0f * cfg->max_acc * fabsf(dist)));
+            if (fabsf(dist) < 0.5f && fabsf(a->sp_vel) < cfg->max_acc * AXIS_DT) {
+                a->sp_pos = goal;
+                a->sp_vel = 0.0f;
+                v_des = 0.0f;
+            }
             break;
-        case PROTO_SP_VELOCITY:
-        case PROTO_SP_POSITION:
+        }
+
+        case PROTO_SP_VELOCITY: {
+            float vmax = a->homed ? cfg->max_vel : cfg->home_vel;
+            v_des = clampf(a->target, -vmax, vmax);
+            if (a->homed) {
+                /* Brake using the position we are about to reach this tick (one-step
+                 * look-ahead), not the stale sp_pos: braking on the stale position
+                 * lags by half a tick's travel (v*dt/2) and lets sp_pos punch through
+                 * the soft limit before the brake curve catches up. */
+                float lookahead = a->sp_pos + a->sp_vel * AXIS_DT;
+                v_des = fminf(v_des, sqrtf(2.0f * cfg->max_acc * fmaxf(0.0f, (float)cfg->pos_max - lookahead)));
+                v_des = fmaxf(v_des, -sqrtf(2.0f * cfg->max_acc * fmaxf(0.0f, lookahead - (float)cfg->pos_min)));
+            }
+            break;
+        }
+
         default:
             a->duty = 0.0f;
-            break;
+            return;
+    }
+
+    a->sp_vel += clampf(v_des - a->sp_vel, -cfg->max_acc * AXIS_DT, cfg->max_acc * AXIS_DT);
+    a->sp_pos += a->sp_vel * AXIS_DT;
+
+    float vel_cmd = a->sp_vel + pidc_update(&a->pos_pid, a->sp_pos - (float)a->pos, AXIS_DT);
+    a->duty = cfg->vel_ff * vel_cmd + pidc_update(&a->vel_pid, vel_cmd - a->vel, AXIS_DT);
+
+    if (fabsf(a->sp_pos - (float)a->pos) > (float)cfg->max_following_error) {
+        enter_fault(a, AXIS_FAULT_FOLLOWING);
     }
 }
 
