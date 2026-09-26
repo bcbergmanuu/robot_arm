@@ -101,6 +101,9 @@ class Telemetry:
     current_ma: int
 
 
+DecodedMessage = Estop | Heartbeat | CommandMsg | Setpoint | Status | Telemetry
+
+
 def make_id(type_: int, node: int) -> int:
     if not 0 <= node <= 7:
         raise ValueError(f"node out of range: {node}")
@@ -159,7 +162,7 @@ def encode_telemetry(node: int, vel: int, current_ma: int) -> can.Message:
     )
 
 
-def decode(msg: can.Message) -> Estop | Heartbeat | CommandMsg | Setpoint | Status | Telemetry | None:
+def decode(msg: can.Message) -> DecodedMessage | None:
     type_ = _type_of(msg.arbitration_id)
     node = _node_of(msg.arbitration_id)
     data = bytes(msg.data)

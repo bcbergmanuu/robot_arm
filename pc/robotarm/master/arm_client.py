@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 import can
@@ -71,6 +71,8 @@ class ArmClient:
         self._last_heartbeat_t = float("-inf")
         self._now: float | None = None  # the `now` of the most recent poll() call (R18)
 
+        self._listeners: list[Callable[[protocol.DecodedMessage], None]] = []
+
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         # Set when the background runner stops on an exception (R19): a can.CanError /
@@ -87,11 +89,21 @@ class ArmClient:
         `now`, not with msg.timestamp -- see the class docstring (R18).
         """
         decoded = protocol.decode(msg)
+        if decoded is None:
+            return
+        for listener in self._listeners:
+            listener(decoded)
         if isinstance(decoded, protocol.Status):
             self._on_status(decoded)
         elif isinstance(decoded, protocol.Telemetry):
             self._on_telemetry(decoded)
         # Estop/Heartbeat/CommandMsg/Setpoint are master->node traffic; nothing to update.
+
+    def add_listener(self, callback: Callable[[protocol.DecodedMessage], None]) -> None:
+        """Register `callback(decoded)`, called from process() for every successfully
+        decoded frame (Task 18: IdentifyRun uses this to timestamp raw STATUS/TELEMETRY
+        pairs by tick index rather than by poll()'s `now`, see R26)."""
+        self._listeners.append(callback)
 
     def keepalive(self, now: float) -> None:
         """Tell the client the application loop is alive (R23; see keepalive_timeout)."""

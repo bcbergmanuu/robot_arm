@@ -195,11 +195,26 @@ the ~2 ms lag of the current reading.
 
 ### Redoing this on the robot
 
-Once the arm is back, `robotarm identify` (Task 18) records a step on a known axis with a known
-motor, encoder and supply. Feed that CSV (same columns: `time_us,position,velocity,pwm_ticks,current`)
-to `robotarm stepfit <csv> --motor <name> --supply <V> --cpr <4 × lines>` to refit `J`, `b`,
-`T_c` per axis, and replace the `(assumed)` friction values in `config/arm.yaml` with the
-results referred to the joint (`× gear_ratio` for torques, `× gear_ratio²` for `J` and `b`).
+`robotarm identify --bus <URL> --node <N> [--duty 1.0] [--out output.txt]` runs the same
+open-loop step over CAN instead of the firmware's old hard-coded bench test: enable, duty 0
+(80 ms), `--duty` (80 ms), duty 0 (40 ms), disable, recording every STATUS+TELEMETRY pair of
+that node into a CSV with exactly `output.txt`'s columns
+(`time_us,position,velocity,pwm_ticks,current`). It works on the simulator (`--bus sim` or
+`--bus tcp://127.0.0.1:29536` against `robotarm sim`) today and on the real robot later,
+unchanged -- the encoders are incremental and DUTY mode is open-loop, so no homing is needed.
+It refuses (exit 2) if the axis isn't DISABLED/READY (not FAULT/HOMING) or if `--duty` exceeds
+the axis's `max_duty`.
+
+```
+uv run robotarm identify --bus sim --node 2 --duty 0.5 --out output.txt
+uv run robotarm stepfit output.txt --motor <name> --supply <V> --cpr <4 × lines> \
+    --plot docs/img/stepfit.png --out config/bench_identified.yaml
+```
+
+Once the arm is back, run this on a known axis with a known motor, encoder and supply, then
+refit `J`, `b`, `T_c` per axis and replace the `(assumed)` friction values in `config/arm.yaml`
+with the results referred to the joint (`× gear_ratio` for torques, `× gear_ratio²` for `J`
+and `b`).
 
 ## Gain tuning in simulation
 

@@ -4,7 +4,7 @@ import sys
 
 from robotarm import bus
 from robotarm.analysis import steptest
-from robotarm.master import gamepad, teleop
+from robotarm.master import gamepad, identify, teleop
 from robotarm.sim import server as sim_server
 from robotarm.sim import tune
 from robotarm.tools import gen_config
@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     bus.register(subparsers)
     gamepad.register(subparsers)
     teleop.register(subparsers)
+    identify.register(subparsers)
     return parser
 
 
