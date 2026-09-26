@@ -3,6 +3,7 @@ import argparse
 import sys
 
 from robotarm.analysis import steptest
+from robotarm.sim import tune
 from robotarm.tools import gen_config
 
 
@@ -11,6 +12,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     gen_config.register(subparsers)
     steptest.register(subparsers)
+    tune.register(subparsers)
     return parser
 
 
