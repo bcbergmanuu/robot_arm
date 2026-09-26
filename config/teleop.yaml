@@ -1,0 +1,25 @@
+deadzone: 0.12
+loop_hz: 50
+speed_scale: {normal: 0.5, slow: 0.15}      # fraction of each joint's max velocity; R1 held = slow
+buttons:                                     # PlayStation names (see gamepad.py)
+  deadman: l1
+  slow: r1
+  enable: cross
+  estop: circle
+  home: triangle
+  toggle_mode: square
+  clear_faults: options
+joint_mode:                                  # stick/button -> joint; sign flips direction
+  j1: {axis: lx, sign: -1}
+  j2: {axis: ly, sign: 1}                    # (R4) stick up -> shoulder tilts forward, +q2
+  j3: {axis: ry, sign: 1}
+  j5: {axis: rx, sign: 1}
+  j4: {buttons: [dpad_up, dpad_down]}        # + / -
+  j6: {triggers: [l2, r2]}                   # (R5) velocity = (l2 - r2) * max: l2 opens (+), r2 closes (-, toward 0 = closed)
+cartesian_mode:
+  linear_speed_m_s: 0.05
+  pitch_speed_rad_s: 0.5
+raw_joystick_fallback:                       # DualSense on macOS without GameController support
+  buttons: {cross: 0, circle: 1, square: 2, triangle: 3, share: 4, ps: 5, options: 6, l3: 7, r3: 8, l1: 9, r1: 10,
+            dpad_up: 11, dpad_down: 12, dpad_left: 13, dpad_right: 14}
+  axes: {lx: 0, ly: 1, rx: 2, ry: 3, l2: 4, r2: 5}
