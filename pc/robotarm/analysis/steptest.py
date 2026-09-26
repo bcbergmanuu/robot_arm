@@ -21,7 +21,6 @@ from robotarm.config import MotorConfig, load_arm_config
 from robotarm.sim.native import BenchParams, MotorParams, run_bench
 
 PWM_TICK_MAX = 400      # BDC_MCPWM_DUTY_TICK_MAX in the firmware that made the recording
-ADC_MAX_MV = 2500.0
 DEFAULT_MOTOR = "faulhaber_2657cr_12v"
 
 _FIT_KEYS = ("j_total", "b_viscous", "tau_coulomb")
@@ -64,11 +63,11 @@ def simulate(params: BenchParams, data: StepData) -> np.ndarray:
     return run_bench(params, data.duty, _sample_dt(data)).pos.astype(np.int64)
 
 
-def motor_params(motor: MotorConfig, supply_v: float, counts_per_rev: float) -> MotorParams:
+def motor_params(motor: MotorConfig, supply_v: float, counts_per_rev: float, adc_max_mv: float) -> MotorParams:
     """Motor alone on the bench: no gearbox, encoder counts per motor revolution."""
     return MotorParams(R=motor.R, L=motor.L, kt=motor.kt, supply_v=supply_v, gear_ratio=1.0,
                        gear_efficiency=1.0, counts_per_motor_rev=counts_per_rev,
-                       sense_mv_per_a=motor.sense_mv_per_a, adc_max_mv=ADC_MAX_MV)
+                       sense_mv_per_a=motor.sense_mv_per_a, adc_max_mv=adc_max_mv)
 
 
 def _bench(mp: MotorParams, x: np.ndarray) -> BenchParams:
@@ -84,13 +83,13 @@ def _report(params: BenchParams, data: StepData) -> FitReport:
 
 
 def fit_bench(data: StepData, motor: MotorConfig, supply_v: float,
-              counts_per_rev: float) -> tuple[BenchParams, FitReport]:
+              counts_per_rev: float, adc_max_mv: float) -> tuple[BenchParams, FitReport]:
     """Least-squares fit of (log J, log b, log Tc) to the recorded position trace.
 
     The encoder quantisation makes the cost piecewise constant, hence the coarse
     finite-difference step and a small grid of starts scaled by the motor's
     electrical time constant and stall torque."""
-    mp = motor_params(motor, supply_v, counts_per_rev)
+    mp = motor_params(motor, supply_v, counts_per_rev, adc_max_mv)
     electrical_damping = motor.kt**2 / motor.R          # Nm s/rad of the (shorted) winding
     stall_torque = motor.kt * supply_v / motor.R
 
@@ -174,10 +173,11 @@ def plot_fit(path: Path, data: StepData, params: BenchParams, title: str) -> Non
 
 def _cmd_stepfit(args: argparse.Namespace) -> int:
     data = load_step_csv(args.csv)
-    motors = load_arm_config().motors
+    arm_cfg = load_arm_config()
+    motors = arm_cfg.motors
     if args.motor not in motors:
         raise SystemExit(f"unknown motor {args.motor!r}; known: {', '.join(motors)}")
-    params, report = fit_bench(data, motors[args.motor], args.supply, args.cpr)
+    params, report = fit_bench(data, motors[args.motor], args.supply, args.cpr, arm_cfg.adc_max_mv)
     final = float(data.pos[-1])
     print(f"motor {args.motor} @ {args.supply:g} V, {args.cpr:g} counts/rev")
     print(f"  j_total     = {params.j_total:.4g} kg m^2")

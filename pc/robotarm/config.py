@@ -119,6 +119,7 @@ class ArmConfig:
     axes: list[AxisConfig]
     motors: dict[str, MotorConfig]
     geometry: Geometry
+    adc_max_mv: float
     bench: dict | None = None
 
     def axis(self, node: int) -> AxisConfig:
@@ -271,5 +272,6 @@ def load_arm_config(path: Path | None = None) -> ArmConfig:
         axes=axes,
         motors=motors,
         geometry=geometry,
+        adc_max_mv=float(raw["current_sense"]["adc_max_mv"]),
         bench=raw.get("bench"),
     )
