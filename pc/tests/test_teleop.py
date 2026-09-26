@@ -287,17 +287,14 @@ def test_estop_then_clear_and_enable_buttons(rig):
 
 
 def test_home_button_homes_and_backs_off_inside_soft_limits(cfg, tcfg):
-    """The not-armed zero-velocity stream must not cut short the firmware's post-home back-off."""
+    """Homing via Triangle: teleop must not cut short the firmware's post-home back-off (R21: no setpoints while idle)."""
     world = SimWorld(cfg, initial_q=near_home_start(cfg))
     bus = SimBus(world)
     try:
         client = ArmClient(bus, cfg)
         pad = FakeGamepad()
         r = Rig(world, bus, client, Teleop(client, cfg, tcfg), pad)
-        # Home promptly: within ~0.15 s wrist_bend sags onto its end stop, and homing an
-        # axis that already rests on its stop trips OVERCURRENT (a firmware homing issue
-        # outside teleop: AXIS_HOME_SETTLE_MS + AXIS_HOME_STALL_MS > overcurrent_ms).
-        r.drive(0.02)
+        r.drive(3.0)  # let wrist_bend sag onto its stop first: homing must cope (R20)
         press(pad, "triangle")
         r.drive(0.1)
         release(pad, "triangle")
@@ -310,6 +307,62 @@ def test_home_button_homes_and_backs_off_inside_soft_limits(cfg, tcfg):
     finally:
         bus.shutdown()
         world.close()
+
+
+def _record_velocity_setpoints(client):
+    """Wrap client.set_velocity so the test can see every (node, rad_s) teleop sends."""
+    sent = []
+    real = client.set_velocity
+
+    def spy(node, rad_s):
+        sent.append((node, rad_s))
+        real(node, rad_s)
+
+    client.set_velocity = spy
+    return sent
+
+
+def test_idle_sends_no_setpoints_only_zeros_after_disarm_or_loss(rig):
+    """R21: while not jogging, teleop sends nothing -- except zero velocity to every jog
+    axis for 3 updates after jogging stops and after the pad is lost."""
+    n_jog = len(rig.teleop.cfg.joint_mode)
+    sent = _record_velocity_setpoints(rig.client)
+
+    rig.drive(0.2)  # 10 idle updates
+    assert sent == []
+
+    press(rig.pad, "l1")
+    rig.pad.set(ly=1.0)
+    rig.drive(0.2)
+    assert len(sent) == 10 * n_jog and any(v != 0.0 for _n, v in sent)
+
+    sent.clear()
+    release(rig.pad, "l1")  # disarm edge
+    rig.drive(0.2)
+    assert len(sent) == 3 * n_jog and all(v == 0.0 for _n, v in sent)
+
+    sent.clear()
+    rig.pad.set(connected=False)  # pad loss while idle
+    rig.drive(0.2)
+    assert len(sent) == 3 * n_jog and all(v == 0.0 for _n, v in sent)
+
+
+@pytest.mark.parametrize("inputs", [{"buttons": frozenset({"l1", "dpad_up"})},
+                                    {"buttons": frozenset({"l1"}), "l2": 1.0}])
+def test_slow_button_scales_dpad_and_triggers(rig, inputs):
+    """R22: R1 scales every jog input by slow/normal, not only the sticks."""
+    sent = _record_velocity_setpoints(rig.client)
+    rig.drive(0.02)
+    rig.pad.set(**inputs)
+    rig.drive(0.04)
+    fast = [v for _n, v in sent if v != 0.0]
+    sent.clear()
+    press(rig.pad, "r1")
+    rig.drive(0.04)
+    slow = [v for _n, v in sent if v != 0.0]
+    ratio = rig.teleop.cfg.speed_scale["slow"] / rig.teleop.cfg.speed_scale["normal"]
+    assert fast and len(slow) == len(fast)
+    assert slow == pytest.approx([v * ratio for v in fast])
 
 
 def test_status_line_is_one_line(rig):

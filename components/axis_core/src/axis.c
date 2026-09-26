@@ -26,7 +26,11 @@ static void check_safety(axis_t *a, const axis_inputs_t *in) {
         enter_fault(a, AXIS_FAULT_WATCHDOG);
     }
 
-    if (a->state != AXIS_DISABLED && a->state != AXIS_FAULT) {
+    if (a->state == AXIS_HOMING && a->home_ms <= AXIS_HOME_OC_GRACE_MS) {
+        /* R20: stall current is expected while homing starts against the stop; the
+         * stall detector (after AXIS_HOME_SETTLE_MS) must get a chance first. */
+        a->overcurrent_ms = 0;
+    } else if (a->state != AXIS_DISABLED && a->state != AXIS_FAULT) {
         if (in->current_ma > a->cfg->max_current_ma) {
             a->overcurrent_ms++;
             if (a->overcurrent_ms > a->cfg->overcurrent_ms) enter_fault(a, AXIS_FAULT_OVERCURRENT);

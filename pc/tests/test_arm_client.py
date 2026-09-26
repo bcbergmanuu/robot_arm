@@ -224,3 +224,32 @@ def test_connected_over_tcp_then_stale_after_server_stops(cfg):
         bus.shutdown()
         server.close()
         world.close()
+
+
+# --- R20: homing from rest against / near the home stop ---
+
+
+def test_rehome_from_rest_all_homed_no_faults(cfg, sim):
+    """Home, then HOME again: several axes (e.g. the shoulder, parked at its soft limit
+    4 deg from its stop) start the second run at or near their stop."""
+    world, bus = sim(near_home_start(cfg))
+    client = ArmClient(bus, cfg)
+    client.home()
+    run_lockstep(world, bus, 8.0, on_ms=client.poll)
+    assert client.all_homed() and not client.any_fault()
+
+    client.home()
+    run_lockstep(world, bus, 10.0, on_ms=client.poll)
+    assert client.all_homed() and client.all_ready()
+    assert not client.any_fault()
+
+
+def test_home_after_axes_sag_onto_their_stops(cfg, sim):
+    """Starting near home and waiting lets gravity press wrist_bend onto its stop before HOME."""
+    world, bus = sim(near_home_start(cfg))
+    client = ArmClient(bus, cfg)
+    run_lockstep(world, bus, 3.0, on_ms=client.poll)
+    client.home()
+    run_lockstep(world, bus, 10.0, on_ms=client.poll)
+    assert client.all_homed() and client.all_ready()
+    assert not client.any_fault()

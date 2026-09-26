@@ -82,6 +82,39 @@ static void test_no_velocity_spike_when_home_is_set(void) {
     TT_CHECK(r.a.state == AXIS_READY && r.a.faults == 0);
 }
 
+/* R20: an axis already pressed against its home stop when HOME starts draws stall
+ * current from the first ms. Stall detection only starts after the settle window,
+ * so the overcurrent check must not fault it first. */
+static void test_homes_when_already_pressed_against_stop(void) {
+    rig_t r; rig_init(&r, &TEST_CFG);
+    r.p.pos = -2500.0; r.p.has_stop = 1; r.p.stop_pos = -2500.0; r.p.stop_dir = -1;
+    cmd(&r, PROTO_CMD_HOME);
+    run_ms(&r, 5000);
+    TT_CHECK(r.a.homed && r.a.state == AXIS_READY);
+    TT_CHECK((r.a.faults & AXIS_FAULT_OVERCURRENT) == 0);
+    TT_CHECK(r.a.faults == 0);
+}
+
+/* R20: the overcurrent suspension during homing is bounded. A jammed axis drawing
+ * 2500 mA whose stall is never recognised (current below home_current_ma, encoder
+ * still counting as if moving) must still fault once the grace window has passed. */
+static void test_jammed_homing_still_faults_overcurrent(void) {
+    axis_config_t cfg = TEST_CFG; cfg.home_current_ma = 3000.0f; /* 2500 mA never counts as stall */
+    axis_t a; axis_init(&a, &cfg);
+    can_frame_t f; proto_encode_command(&f, 3, PROTO_CMD_HOME); axis_on_frame(&a, &f);
+    int32_t raw = 0;
+    int ms = 0;
+    for (; ms < 2000 && a.state == AXIS_HOMING; ms++) {
+        if (ms % 50 == 0) { proto_encode_heartbeat(&f, 0); axis_on_frame(&a, &f); }
+        raw -= 3; /* 3000 counts/s toward the stop: > 0.2 * home_vel, so no stall evidence */
+        axis_inputs_t in = {raw, 2500.0f};
+        axis_outputs_t out; axis_tick(&a, &in, &out);
+        while (axis_pop_tx(&a, &f)) {}
+    }
+    TT_CHECK(a.state == AXIS_FAULT && (a.faults & AXIS_FAULT_OVERCURRENT) && !a.homed);
+    TT_CHECK(ms <= AXIS_HOME_OC_GRACE_MS + (int)cfg.overcurrent_ms + 2);
+}
+
 int main(void) {
     TT_RUN(test_homes_against_stop_and_backs_off);
     TT_RUN(test_homing_times_out_without_stop);
@@ -89,5 +122,7 @@ int main(void) {
     TT_RUN(test_stall_ignored_during_settle_window);
     TT_RUN(test_rehoming_from_ready);
     TT_RUN(test_no_velocity_spike_when_home_is_set);
+    TT_RUN(test_homes_when_already_pressed_against_stop);
+    TT_RUN(test_jammed_homing_still_faults_overcurrent);
     return TT_DONE();
 }

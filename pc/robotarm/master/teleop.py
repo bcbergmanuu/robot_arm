@@ -11,9 +11,15 @@ by tests in lockstep with the simulator); `run_teleop` is the body of the
 - `armed` goes true only on a rising edge of the deadman while the pad is
   connected; releasing the deadman or losing the pad disarms, and after a
   loss the deadman must be released and pressed again.
-- Not armed: zero velocity is sent to every jog axis on every update.
-- Armed + JOINT: every mapped joint gets a velocity setpoint every update.
+- Armed + JOINT ("jogging"): every mapped joint gets a velocity setpoint every
+  update; the slow button scales every jog input (R22).
 - Armed + CARTESIAN: not implemented yet (Task 17) -- behaves as not armed.
+- When jogging stops (deadman released, pad lost, E-STOP) and when the pad is
+  lost, zero velocity goes to every jog axis for the next
+  _STOP_REPEAT_UPDATES updates (repeated for robustness); otherwise, while not
+  jogging, teleop sends no setpoints at all -- so it never overrides HOME's
+  back-off move or anything else -- and ArmClient's heartbeats keep the axis
+  watchdogs fed (R21).
 """
 
 from __future__ import annotations
@@ -44,11 +50,7 @@ DEFAULT_TELEOP_CONFIG_RELATIVE_PATH = "config/teleop.yaml"
 _DPAD_FRACTION = 0.5  # a d-pad pair jogs at +/- this fraction of the joint's max velocity
 _ANALOG_INPUTS = frozenset({"lx", "ly", "rx", "ry", "l2", "r2"})  # float fields of GamepadState
 _STATUS_PERIOD_S = 0.1  # CLI status line refresh (10 Hz)
-# The firmware finishes HOME with a position move from the end stop back to the
-# soft limit. While a homed axis is still outside its soft range (plus this
-# tolerance) the not-armed zero-velocity stream skips it, so it cannot cut that
-# back-off short (a velocity setpoint would replace the position move).
-_BACKOFF_TOLERANCE_RAD = math.radians(0.5)
+_STOP_REPEAT_UPDATES = 3  # zero-velocity updates sent after jogging stops or the pad is lost (R21)
 
 
 class Mode(Enum):
@@ -63,6 +65,10 @@ class JointBinding:
     axis:     velocity = stick value * sign * max * speed scale
     buttons:  (first, second) -> +/- _DPAD_FRACTION * max * sign
     triggers: (first, second) -> (first - second) * sign * max
+
+    The d-pad and trigger speeds above are the normal-speed values; holding
+    the slow button scales them by speed_scale.slow / speed_scale.normal,
+    just as it scales the sticks (R22).
     """
 
     joint: str
@@ -130,6 +136,8 @@ class Teleop:
         self.armed = False
         self._pad = GamepadState()
         self._now: float | None = None
+        self._jogging = False
+        self._stop_updates_left = 0
 
         by_joint = {a.joint: a for a in arm_cfg.axes}
         unknown = [b.joint for b in cfg.joint_mode if b.joint not in by_joint]
@@ -146,6 +154,7 @@ class Teleop:
 
     def update(self, pad: GamepadState, now: float) -> None:
         self._now = now
+        pad_lost = self._pad.connected and not pad.connected
         self._pad = pad
         buttons = pad.buttons if pad.connected else frozenset()
         edges = buttons - self._prev_buttons
@@ -173,14 +182,22 @@ class Teleop:
         if not self.armed and roles.get("toggle_mode") in edges:
             self.mode = Mode.CARTESIAN if self.mode is Mode.JOINT else Mode.JOINT
 
-        if self.armed and self.mode is Mode.JOINT:
+        jogging = self.armed and self.mode is Mode.JOINT
+        if (self._jogging and not jogging) or pad_lost:
+            self._stop_updates_left = _STOP_REPEAT_UPDATES
+        self._jogging = jogging
+
+        if jogging:
             self._jog_joints(pad)
-        else:
-            self._hold_still()
+        elif self._stop_updates_left > 0:
+            self._stop_updates_left -= 1
+            for axis in self._jog_axes:
+                self.client.set_velocity(axis.node, 0.0)
 
     def _jog_joints(self, pad: GamepadState) -> None:
         slow = self.cfg.buttons.get("slow") in pad.buttons
         scale = self.cfg.speed_scale["slow" if slow else "normal"]
+        normal = self.cfg.speed_scale["normal"]  # d-pad/trigger speeds are specified at normal speed (R22)
         for binding, axis in self._bindings:
             vmax = axis.max_velocity_rad_s
             if binding.axis is not None:
@@ -188,19 +205,12 @@ class Teleop:
             elif binding.buttons is not None:
                 plus, minus = binding.buttons
                 v = _DPAD_FRACTION * vmax * ((plus in pad.buttons) - (minus in pad.buttons))
+                v *= scale / normal
             else:
                 first, second = binding.triggers
-                v = (getattr(pad, first) - getattr(pad, second)) * vmax
+                v = (getattr(pad, first) - getattr(pad, second)) * vmax * scale / normal
             v = max(-vmax, min(vmax, v * binding.sign))
             self.client.set_velocity(axis.node, v)
-
-    def _hold_still(self) -> None:
-        for axis in self._jog_axes:
-            js = self.client.joints[axis.node]
-            lo, hi = axis.soft_limits_rad
-            backing_off = js.homed and not (lo - _BACKOFF_TOLERANCE_RAD <= js.position_rad <= hi + _BACKOFF_TOLERANCE_RAD)
-            if not backing_off:
-                self.client.set_velocity(axis.node, 0.0)
 
     # -- status --------------------------------------------------------------------
 

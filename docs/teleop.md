@@ -14,9 +14,8 @@ make teleop                 # terminal 2: uv run robotarm teleop --bus tcp://127
 
 Then, on the controller:
 
-1. **Triangle** homes every axis. In the sim the wrist bend will usually fault with
-   `OVERCURRENT` here, because it has already sagged onto its end stop. See *Known issue*
-   below for the recovery steps.
+1. **Triangle** homes every axis. Each axis drives into its home stop, then backs off to its
+   soft limit.
 2. **Cross** enables any axis that is still DISABLED. Homing leaves axes READY already.
 3. **Hold L1** (the deadman) and move the sticks. Let go of L1 and the arm stops.
 
@@ -61,7 +60,7 @@ degrees. When an axis has a fault, `| FAULT j2:FOLLOWING` is added to the end.
 | Input | Action |
 |---|---|
 | L1 (hold) | **Deadman**. Nothing moves unless it is held. |
-| R1 (hold) | Slow: sticks at 15 % of each joint's max speed instead of 50 % |
+| R1 (hold) | Slow: every jog input runs at 0.3x its normal speed (`speed_scale.slow` / `speed_scale.normal`). Sticks drop from 50 % to 15 % of max, the d-pad from 50 % to 15 %, and the triggers from 100 % to 30 %. |
 | Left stick up/down | j2 shoulder. Up = +q2 (tilts forward) |
 | Left stick left/right | j1 hip. Right = -q1 (clockwise seen from above) |
 | Right stick up/down | j3 elbow. Up = +q3 |
@@ -83,10 +82,11 @@ in cartesian mode, even with L1 held.
 - **Deadman.** You become *armed* only when you *press* L1 while the controller is connected.
   Releasing L1 disarms. Holding L1 while the program starts does not arm you: let go and
   press it again.
-- **Not armed means stopped.** While not armed, every jog axis gets a zero-velocity setpoint on
-  every loop (50 Hz), so it stops within one deceleration ramp. There is one exception: an axis
-  that has just homed and is still backing off its end stop into the soft range is left alone
-  until it gets there.
+- **Releasing the deadman stops the arm.** When jogging stops (L1 released, controller lost,
+  E-STOP), every jog axis gets a zero-velocity setpoint on the next 3 loops (60 ms), repeated in
+  case a frame is lost. The axes then decelerate to a stop on their own ramps. The same happens
+  when the controller drops out. At all other times while not armed, teleop sends no setpoints,
+  so it never interferes with HOME or anything else. Heartbeats alone keep the axis watchdogs fed.
 - **Buttons act on the press.** Holding a button does nothing more. A button held while the
   program starts, or held through a controller reconnect, does nothing until you release it.
 - **E-STOP (Circle) always works**, armed or not, and it also disarms you. To recover: Options
@@ -121,25 +121,3 @@ It prints the live state 10 times a second: stick values (up = +y), triggers fro
 the pressed buttons by their PlayStation names. The output says `disconnected` if SDL cannot see
 the controller. Press Ctrl-C to stop. If buttons show up under the wrong names, pygame fell back
 to raw joystick mode, and the index map is `raw_joystick_fallback` in `config/teleop.yaml`.
-
-## Known issue: homing an axis that already rests on its end stop
-
-The firmware ignores stall detection for the first `AXIS_HOME_SETTLE_MS` (300 ms) of a HOME.
-Declaring home found then takes another `AXIS_HOME_STALL_MS` (100 ms), but the overcurrent
-fault trips after `overcurrent_ms` (200 ms). So when HOME starts with an axis already pressed
-against its home stop, or within a few degrees of it, that axis faults with `OVERCURRENT`
-instead of homing.
-
-In the sim this happens in two ways:
-
-- If you wait more than about 0.15 s after `make sim` starts, the wrist bend sags onto its stop
-  under gravity.
-- If you home a second time, some axes (for example the shoulder, 4° from its stop at the soft
-  limit) are still close to their stops.
-
-To recover:
-
-1. Press Options, then Cross.
-2. Jog each affected axis at least 10° away from its home stop. Unhomed axes jog slowly, with no
-   soft limits.
-3. Press Triangle again.

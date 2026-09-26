@@ -33,6 +33,10 @@ typedef struct {
 #define AXIS_STATUS_DIVIDER 10 /* 100 Hz status at 1 kHz tick */
 #define AXIS_HOME_SETTLE_MS 300 /* ignore stall detection right after homing starts */
 #define AXIS_HOME_STALL_MS 100  /* consecutive ms of stall evidence before declaring home found */
+/* R20: overcurrent is not accumulated for the first AXIS_HOME_OC_GRACE_MS of HOMING, so an axis that
+ * starts pressed against its stop can be recognised as stalled first. Bounded: afterwards the normal
+ * overcurrent rule applies again (and home_timeout_ms still guards the whole sequence). */
+#define AXIS_HOME_OC_GRACE_MS (AXIS_HOME_SETTLE_MS + AXIS_HOME_STALL_MS + 100)
 
 typedef struct {
     const axis_config_t *cfg;
