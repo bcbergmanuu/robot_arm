@@ -965,3 +965,27 @@ def test_load_teleop_config_rejects_bad_cartesian_mode(tmp_path, cart):
     bad.write_text("deadzone: 0.1\nloop_hz: 50\nspeed_scale: {normal: 0.5, slow: 0.1}\nbuttons: {deadman: l1}\n" + cart)
     with pytest.raises(ValueError, match="cartesian_mode"):
         load_teleop_config(bad)
+
+
+# --- R33: stale_input_s (silent-pad detection in the real Gamepad) ------------------------
+
+
+_VALID_TELEOP_BASE = ("deadzone: 0.1\nloop_hz: 50\nspeed_scale: {normal: 0.5, slow: 0.1}\nbuttons: {deadman: l1}\n"
+                      "cartesian_mode: {linear_speed_m_s: 0.05, pitch_speed_rad_s: 0.5}\n")
+
+
+def test_stale_input_s_loaded_with_default(tcfg, tmp_path):
+    assert tcfg.stale_input_s == pytest.approx(0.5)
+    cfg_file = tmp_path / "teleop.yaml"
+    cfg_file.write_text(_VALID_TELEOP_BASE)
+    assert load_teleop_config(cfg_file).stale_input_s == pytest.approx(0.5)
+    cfg_file.write_text(_VALID_TELEOP_BASE + "stale_input_s: 0\n")
+    assert load_teleop_config(cfg_file).stale_input_s == 0.0
+
+
+@pytest.mark.parametrize("value", ["-0.1", ".nan", ".inf", "abc"])
+def test_stale_input_s_rejects_bad_values(tmp_path, value):
+    bad = tmp_path / "teleop.yaml"
+    bad.write_text(_VALID_TELEOP_BASE + f"stale_input_s: {value}\n")
+    with pytest.raises(ValueError, match="stale_input_s"):
+        load_teleop_config(bad)

@@ -18,6 +18,16 @@ window has focus.
 
 `Gamepad().poll()` never raises: with no pad attached (CI, a laptop with
 nothing plugged in) it returns a disconnected `GamepadState`.
+
+Silent-pad detection (controller ruling R33): a Bluetooth pad that goes out of
+range or flat is not always reported as removed by SDL -- it can keep returning
+its last report forever, including a stick held forward. So `Gamepad` (not
+`FakeGamepad`) also reports `connected=False` when a stick is deflected past the
+deadzone and ALL raw inputs (every axis, trigger, button, hat) have been
+bit-identical for `stale_input_s` seconds (0 disables the check). Real sticks
+held by a hand jitter by at least one LSB; a stick resting at centre is not
+checked (a still pad lying on the table is fine). A USB cable avoids the whole
+issue and is recommended for first hardware sessions.
 """
 
 from __future__ import annotations
@@ -30,7 +40,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pygame
 import yaml
@@ -58,6 +68,16 @@ _CONTROLLER_BUTTON_TO_NAME = {
     pygame.CONTROLLER_BUTTON_DPAD_LEFT: "dpad_left",
     pygame.CONTROLLER_BUTTON_DPAD_RIGHT: "dpad_right",
 }
+
+# Every SDL GameController axis, in the order the raw snapshot stores them (see Gamepad._read_raw).
+_CONTROLLER_AXES = (
+    pygame.CONTROLLER_AXIS_LEFTX,
+    pygame.CONTROLLER_AXIS_LEFTY,
+    pygame.CONTROLLER_AXIS_RIGHTX,
+    pygame.CONTROLLER_AXIS_RIGHTY,
+    pygame.CONTROLLER_AXIS_TRIGGERLEFT,
+    pygame.CONTROLLER_AXIS_TRIGGERRIGHT,
+)
 
 _INT16_MAX = 32767  # SDL axis range is -32768..32767; symmetric normalisation
 
@@ -122,9 +142,14 @@ class Gamepad:
     and passes it; this class never touches config files).
     """
 
-    def __init__(self, deadzone: float = 0.12, raw_fallback: dict[str, Any] | None = None) -> None:
+    def __init__(self, deadzone: float = 0.12, raw_fallback: dict[str, Any] | None = None,
+                 stale_input_s: float = 0.5, clock: Callable[[], float] = time.monotonic) -> None:
         self._deadzone = deadzone
         self._raw_fallback = raw_fallback or {}
+        self._stale_input_s = stale_input_s
+        self._clock = clock
+        self._last_raw: tuple | None = None
+        self._last_raw_change = 0.0
         self._use_controller_api = _sdl_controller is not None
         self._device: Any = None  # pygame._sdl2.controller.Controller or pygame.joystick.Joystick
         self._caller_sigint_handler: Any = None
@@ -181,15 +206,53 @@ class Gamepad:
             return GamepadState(connected=False)
 
     def _poll_inner(self) -> GamepadState:
+        self._pump_events()
+        if self._device is None:
+            self._last_raw = None
+            return GamepadState(connected=False)
+        raw = self._read_raw()
+        if raw is None:  # detached
+            self._device = None
+            self._last_raw = None
+            return GamepadState(connected=False)
+        state = self._decode_controller(raw) if self._use_controller_api else self._decode_raw_joystick(raw)
+        if self._input_frozen(raw, state):
+            return GamepadState(connected=False)
+        return state
+
+    def _pump_events(self) -> None:
         self._restore_sigint()  # see _restore_sigint's docstring: SDL can re-grab it
         pygame.event.pump()
         for event in pygame.event.get():
             self._handle_hotplug(event)
-        if self._device is None:
-            return GamepadState(connected=False)
+
+    def _input_frozen(self, raw: tuple, state: GamepadState) -> bool:
+        """R33: a stick deflected past the deadzone while every raw input has stayed bit-identical
+        for stale_input_s -> treat the pad as lost (see the module docstring)."""
+        now = self._clock()
+        if raw != self._last_raw:
+            self._last_raw = raw
+            self._last_raw_change = now
+            return False
+        if self._stale_input_s <= 0:
+            return False
+        deflected = any((state.lx, state.ly, state.rx, state.ry))
+        return deflected and now - self._last_raw_change >= self._stale_input_s
+
+    def _read_raw(self) -> tuple | None:
+        """Every raw input of the open device as a comparable snapshot, or None if it detached."""
         if self._use_controller_api:
-            return self._read_controller()
-        return self._read_raw_joystick()
+            c = self._device
+            if not c.attached():
+                return None
+            return (tuple(c.get_axis(i) for i in _CONTROLLER_AXES),
+                    tuple(bool(c.get_button(i)) for i in _CONTROLLER_BUTTON_TO_NAME))
+        j = self._device
+        if not j.get_init():
+            return None
+        return (tuple(j.get_axis(i) for i in range(j.get_numaxes())),
+                tuple(bool(j.get_button(i)) for i in range(j.get_numbuttons())),
+                tuple(j.get_hat(i) for i in range(j.get_numhats())))
 
     def _handle_hotplug(self, event: pygame.event.Event) -> None:
         if self._use_controller_api:
@@ -218,33 +281,29 @@ class Gamepad:
         except pygame.error:
             self._device = None
 
-    def _read_controller(self) -> GamepadState:
-        c = self._device
-        if not c.attached():
-            self._device = None
-            return GamepadState(connected=False)
-        lx = _norm_axis(c.get_axis(pygame.CONTROLLER_AXIS_LEFTX))
-        ly = -_norm_axis(c.get_axis(pygame.CONTROLLER_AXIS_LEFTY))  # SDL +y is down
-        rx = _norm_axis(c.get_axis(pygame.CONTROLLER_AXIS_RIGHTX))
-        ry = -_norm_axis(c.get_axis(pygame.CONTROLLER_AXIS_RIGHTY))
+    def _decode_controller(self, raw: tuple) -> GamepadState:
+        axis_values, button_values = raw
+        a = dict(zip(_CONTROLLER_AXES, axis_values))
+        lx = _norm_axis(a[pygame.CONTROLLER_AXIS_LEFTX])
+        ly = -_norm_axis(a[pygame.CONTROLLER_AXIS_LEFTY])  # SDL +y is down
+        rx = _norm_axis(a[pygame.CONTROLLER_AXIS_RIGHTX])
+        ry = -_norm_axis(a[pygame.CONTROLLER_AXIS_RIGHTY])
         lx, ly = apply_deadzone(lx, ly, self._deadzone)
         rx, ry = apply_deadzone(rx, ry, self._deadzone)
-        l2 = _norm_trigger(c.get_axis(pygame.CONTROLLER_AXIS_TRIGGERLEFT))
-        r2 = _norm_trigger(c.get_axis(pygame.CONTROLLER_AXIS_TRIGGERRIGHT))
-        buttons = frozenset(name for index, name in _CONTROLLER_BUTTON_TO_NAME.items() if c.get_button(index))
+        l2 = _norm_trigger(a[pygame.CONTROLLER_AXIS_TRIGGERLEFT])
+        r2 = _norm_trigger(a[pygame.CONTROLLER_AXIS_TRIGGERRIGHT])
+        buttons = frozenset(name for name, pressed in zip(_CONTROLLER_BUTTON_TO_NAME.values(), button_values)
+                            if pressed)
         return GamepadState(connected=True, lx=lx, ly=ly, rx=rx, ry=ry, l2=l2, r2=r2, buttons=buttons)
 
-    def _read_raw_joystick(self) -> GamepadState:
-        j = self._device
-        if not j.get_init():
-            self._device = None
-            return GamepadState(connected=False)
+    def _decode_raw_joystick(self, raw: tuple) -> GamepadState:
+        axis_values, button_values, _hats = raw
         axes = self._raw_fallback.get("axes", {})
         buttons = self._raw_fallback.get("buttons", {})
 
         def axis(name: str) -> float:
             index = axes.get(name)
-            return j.get_axis(index) if index is not None else 0.0
+            return axis_values[index] if index is not None and index < len(axis_values) else 0.0
 
         lx, ly = axis("lx"), -axis("ly")
         rx, ry = axis("rx"), -axis("ry")
@@ -255,7 +314,8 @@ class Gamepad:
         # native 0..1 -- rescale. (assumed: unverified against real hardware)
         l2 = max(0.0, min(1.0, (axis("l2") + 1.0) / 2.0))
         r2 = max(0.0, min(1.0, (axis("r2") + 1.0) / 2.0))
-        pressed = frozenset(name for name, index in buttons.items() if j.get_button(index))
+        pressed = frozenset(name for name, index in buttons.items()
+                            if index < len(button_values) and button_values[index])
         return GamepadState(connected=True, lx=lx, ly=ly, rx=rx, ry=ry, l2=l2, r2=r2, buttons=pressed)
 
 

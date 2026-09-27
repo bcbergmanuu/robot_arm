@@ -1,5 +1,6 @@
 deadzone: 0.12
 loop_hz: 50
+stale_input_s: 0.5                            # (R33) real pad: stick deflected + ALL inputs frozen this long = pad lost; 0 = off
 speed_scale: {normal: 0.5, slow: 0.15}      # fraction of each joint's max velocity; R1 held = slow
 buttons:                                     # PlayStation names (see gamepad.py)
   deadman: l1

@@ -119,8 +119,20 @@ homed: if any of j1–j5 is not homed, the arm holds still and the status line s
 - **Other buttons act on the press.** Holding a button does nothing more. A button held while
   the program starts, or held through a controller reconnect, does nothing until you release it.
   Cross (enable), Triangle (home) and Square (mode) only work while you are **not** armed.
-- **Losing the controller** (Bluetooth drops out, battery dies, cable pulled) disarms at once,
-  and the arm stops. When the controller comes back you must **release and press L1 again**.
+- **Losing the controller** disarms, and the arm stops. Teleop notices the loss in one of two ways:
+  - SDL reports the controller removed (cable pulled, and usually a clean Bluetooth disconnect):
+    on the next loop.
+  - A Bluetooth pad that goes out of range or runs flat is not always reported as removed. It
+    can keep returning its last report, including a stick held forward. So teleop also treats
+    the controller as lost when a stick is pushed past the deadzone and **every** input (sticks,
+    triggers, buttons) has stayed exactly the same for `stale_input_s` (config/teleop.yaml,
+    default 0.5 s; 0 turns the check off). A thumb on a stick always jitters a little, so this
+    does not fire in normal use. It can fire if you hold a stick perfectly still against its rim.
+    That is safe: the arm stops, and you release and press L1 again.
+
+  Until one of those happens (up to `stale_input_s` for a silent Bluetooth pad), the last stick
+  position keeps jogging. **Use a USB cable for the first sessions on the real robot.**
+  When the controller comes back you must **release and press L1 again**.
   Holding it through the reconnect is not enough.
 - **A hung teleop loop stops the arm.** Heartbeats are only sent while the teleop loop is alive:
   it checks in on every iteration, and the check-in expires after 100 ms (or two loop periods,

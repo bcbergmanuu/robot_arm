@@ -66,6 +66,7 @@ from robotarm.master.kinematics import ARM_JOINTS, Kinematics, Pose
 from robotarm.protocol import AxisState, Fault
 
 DEFAULT_TELEOP_CONFIG_RELATIVE_PATH = "config/teleop.yaml"
+DEFAULT_STALE_INPUT_S = 0.5  # R33, see gamepad.py
 
 _DPAD_FRACTION = 0.5  # a d-pad pair jogs at +/- this fraction of the joint's max velocity
 _ANALOG_INPUTS = frozenset({"lx", "ly", "rx", "ry", "l2", "r2"})  # float fields of GamepadState
@@ -114,6 +115,17 @@ class TeleopConfig:
     joint_mode: tuple[JointBinding, ...]
     cartesian_mode: dict[str, float]
     raw_joystick_fallback: dict[str, Any]
+    stale_input_s: float = DEFAULT_STALE_INPUT_S  # R33: real Gamepad's frozen-input timeout, 0 = off
+
+
+def _parse_stale_input_s(raw: Any) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"stale_input_s must be a number of seconds (0 disables), got {raw!r}") from None
+    if not (math.isfinite(value) and value >= 0.0):
+        raise ValueError(f"stale_input_s must be >= 0 seconds (0 disables), got {raw!r}")
+    return value
 
 
 def _default_teleop_config_path() -> Path:
@@ -184,6 +196,7 @@ def _build_teleop_config(raw: dict[str, Any]) -> TeleopConfig:
         joint_mode=tuple(_parse_binding(j, b) for j, b in (raw.get("joint_mode") or {}).items()),
         cartesian_mode=_parse_cartesian_mode(raw.get("cartesian_mode")),
         raw_joystick_fallback=raw.get("raw_joystick_fallback") or {},
+        stale_input_s=_parse_stale_input_s(raw.get("stale_input_s", DEFAULT_STALE_INPUT_S)),
     )
 
 
@@ -398,7 +411,8 @@ def _teleop_loop(bus: can.BusABC, arm_cfg: ArmConfig, cfg: TeleopConfig, mode: M
     teleop.mode = mode
     if gamepad is None:
         try:
-            gamepad = Gamepad(deadzone=cfg.deadzone, raw_fallback=cfg.raw_joystick_fallback)
+            gamepad = Gamepad(deadzone=cfg.deadzone, raw_fallback=cfg.raw_joystick_fallback,
+                              stale_input_s=cfg.stale_input_s)
         except Exception as exc:  # noqa: BLE001 -- any SDL/pygame start-up failure
             return _fail(f"gamepad: {exc}")
 
