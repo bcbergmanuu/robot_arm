@@ -32,7 +32,7 @@
 | 1 | 2 | OVERCURRENT |
 | 2 | 4 | FOLLOWING |
 | 3 | 8 | ESTOP |
-| 4 | 16 | HOMING |
+| 4 | 16 | HOMING (timeout, or moving against `home.direction`: motor/encoder sign wrong) |
 
 ## Rates and watchdog
 

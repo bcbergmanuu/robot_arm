@@ -19,11 +19,11 @@ Why the master is on a PC/Pi and not on an ESP32-S3: the S3 only has Bluetooth L
 
 ### Decisions (made on the user's behalf overnight — revisit in the morning)
 
-1. **Control loop at 1 kHz** (`AXIS_TICK_HZ`), cascaded **position → velocity → duty** with velocity feed-forward. The previous torque (current) PID is dropped as a loop: the TB9051FTG OCM output is magnitude-only and valid only while the bridge drives, so it cannot close a signed current loop. Current is used for overcurrent protection, homing stall detection and telemetry.
+1. **Control loop at 1 kHz** (`AXIS_TICK_HZ`), cascaded **position → velocity → duty** with velocity feed-forward. The previous torque (current) PID is dropped as a loop: the TB9051FTG OCM output is magnitude-only and valid only while the bridge drives, so it cannot close a signed current loop. Current is used for overcurrent protection, homing stall detection and telemetry. The 1 ms ADC average is duty-weighted (`|i|·|duty|`); firmware and simulator both convert it back with `axis_motor_current_from_avg()` (`axis/current_sense.h`, see `docs/bringup.md`).
 2. **Axis units are encoder counts** (position, counts; velocity, counts/s; duty ∈ [−1, 1]; current, mA). The master works in SI (rad, rad/s) and converts with per-axis `counts_per_rad` from the shared config.
 3. **One config file `config/arm.yaml`** is the single source of truth. Python reads it directly; a generator writes `components/axis_core/src/config_table.c` (committed, so the ESP-IDF build needs no Python YAML).
 4. **Homing against the mechanical end stop** (incremental encoders): drive slowly toward the stop, detect stall (current above threshold or speed collapse), define the stop as `home_position`, then back off into the soft limits. The original Katana homes the same way.
-5. **Safety lives in the axis**: command watchdog (200 ms), soft limits, following-error fault, overcurrent fault (not counted during the first 500 ms of HOMING, so an axis that starts pressed against its stop is recognised as stalled first), broadcast E-STOP. The master adds deadman (L1) and gamepad-loss handling.
+5. **Safety lives in the axis**: command watchdog (200 ms), soft limits, following-error fault, overcurrent fault (not counted during the first 500 ms of HOMING, so an axis that starts pressed against its stop is recognised as stalled first), homing direction guard (HOMING fault if the axis moves against `home.direction`, i.e. a motor/encoder sign error), broadcast E-STOP. The master adds deadman (L1) and gamepad-loss handling.
 6. **Simulator:** MuJoCo for rigid-body arm dynamics (gravity, joint friction, mechanical stops as joint limits, reflected rotor inertia as joint `armature`); the DC motor electrical model and the six axis cores run in C (`libsimaxis`) called once per 1 ms step via ctypes.
 7. **Sim ↔ master transport:** in-process `SimBus` (lockstep, deterministic — used by tests) and a TCP bus (`TcpBus`, 13-byte frames) so the simulator (with viewer) and the teleop run as separate processes. On the robot the master uses `slcan`/`gs_usb`/`socketcan` through `python-can`.
 8. **Firmware bench identification** (open-loop duty step, hard-coded in the original firmware's `motor_pid.c`, since deleted along with the rest of the pre-rewrite `main/` in favour of the HAL split below) becomes a protocol feature: `SETPOINT kind=DUTY`, telemetry at 1 kHz in duty mode, recorded by `robotarm identify` on sim or robot.
@@ -43,7 +43,7 @@ Why the master is on a PC/Pi and not on an ESP32-S3: the S3 only has Bluetooth L
 
 States: 0 DISABLED, 1 HOMING, 2 READY, 3 FAULT. Faults bitmask: 1 WATCHDOG, 2 OVERCURRENT, 4 FOLLOWING, 8 ESTOP, 16 HOMING. STATUS+TELEMETRY at 100 Hz (every tick while in DUTY mode). Any HEARTBEAT/COMMAND/SETPOINT addressed to the node or broadcast feeds the watchdog.
 
-See `docs/protocol.md` for the full protocol reference (message framing, timing guarantees, and worked examples) once it lands.
+See `docs/protocol.md` for the full protocol reference (message framing, timing guarantees, and golden vectors).
 
 ### Repository layout (final state)
 
@@ -59,8 +59,8 @@ main/                            ESP32 shell (each board flashed with its own CO
   axis_task.{c,h}                  1 kHz control loop (gptimer ISR), stall watchdog, task WDT, status log
   main.c                           app_main: hal_*_init, axis_task_start
 components/axis_core/             portable C core (IDF component AND host static lib)
-  include/axis/{pid,protocol,axis_config,config_table,axis,version}.h
-  src/{pid,protocol,axis,config_table,version}.c        (config_table.c is generated, committed)
+  include/axis/{pid,protocol,axis_config,config_table,axis,current_sense,version}.h
+  src/{pid,protocol,axis,config_table,current_sense,version}.c        (config_table.c is generated, committed)
 host/                            host CMake project (build/host/, via `make host`)
   CMakeLists.txt
   tests/{tinytest.h,test_config.h,rig.h,plant.h,test_*.c}   (ctest per host/CMakeLists.txt's axis_test())
@@ -70,11 +70,12 @@ pc/robotarm/                    python package (uv project at repo root: pyproje
   config.py protocol.py bus.py cli.py __main__.py
   transport/tcp_bus.py
   sim/{native,model,world,harness,server,pacing,tune}.py
-  master/{arm_client,gamepad,teleop,kinematics,identify,cli_util}.py
+  master/{arm_client,gamepad,teleop,kinematics,identify,axis_cmd,cli_util}.py
   analysis/steptest.py
   tools/gen_config.py
 pc/tests/                       pytest suite (mirrors pc/robotarm/*, run via `make pytest`)
-scripts/idf.sh                  docker wrapper for idf.py (build only; flashing needs a serial port)
+scripts/idf.sh                  docker wrapper for idf.py (top-level build = node 1)
+scripts/build_node.sh           per-board build/flash/monitor: build/nodeN with CONFIG_AXIS_NODE_ID=N
 scripts/sim.sh                  what `make sim` runs: sets up mjpython/DYLD_LIBRARY_PATH on macOS
 Makefile                        host / test / firmware / sim / teleop
 docs/architecture.md docs/protocol.md docs/simulator.md docs/teleop.md docs/bringup.md
@@ -91,9 +92,13 @@ Build and test everything through the `Makefile` targets:
 | `make pytest` | Runs `make host`, then `uv run pytest -q pc/tests`. |
 | `make test` | Runs `ctest` and `pytest` — the required gate before every commit. |
 | `make gen-config` | Runs `uv run robotarm gen-config` to regenerate `components/axis_core/src/config_table.c` from `config/arm.yaml`. |
-| `make firmware` | Builds the ESP32-S3 firmware via `scripts/idf.sh build` (Docker, `espressif/idf:v6.1`). |
+| `make firmware` | Builds the ESP32-S3 firmware via `scripts/idf.sh build` (Docker, `espressif/idf:v6.1`; node 1 — per-board builds: `scripts/build_node.sh N`). |
 | `make sim` | Launches the MuJoCo simulator (`scripts/sim.sh`, which runs `uv run mjpython -m robotarm sim` and sets up `DYLD_LIBRARY_PATH` on macOS; `mjpython` is required for the viewer). |
 | `make teleop` | Launches the PlayStation teleop master against the TCP sim/robot bus. |
+
+`make firmware`, `make sim` and `make teleop` first build the host libraries (`make host`) and run
+`uv run robotarm gen-config --check`. They stop with an error if `config_table.c` is stale against
+`config/arm.yaml` (fix: `make gen-config`).
 
 Other useful commands:
 
@@ -101,7 +106,9 @@ Other useful commands:
 - `uv run robotarm monitor --bus <URL>` — print live axis state/position/faults from any bus (`tcp://…`, `sim`, or a real interface).
 - `uv run robotarm gamepad-test` — print live gamepad state until Ctrl-C, to check a controller before teleop.
 - `uv run robotarm identify --bus <URL> --node <N> [--duty D]` — open-loop step experiment over CAN for `stepfit`; see `docs/simulator.md` and `docs/bringup.md`.
-- `uv run robotarm stepfit <recording> --motor <name> --supply <V> --cpr <N> --out <config.yaml>` — fit the bench motor model to a step recording.
+- `uv run robotarm stepfit <recording> --motor <name> --supply <V> --cpr <N> [--out <config.yaml>]` — fit the bench motor model to a step recording (default outputs: `stepfit_<recording>.yaml/.png`).
+- `uv run robotarm axis {home,enable,disable,clear} --node <N> --bus <URL>` — one command to one axis, waiting for the result (bring-up; see `docs/bringup.md`).
+- `scripts/build_node.sh <N> {build | flash -p PORT | monitor -p PORT}` — per-board firmware with `CONFIG_AXIS_NODE_ID=N` in `build/nodeN`.
 - `uv run robotarm tune --axis <name> [--velocity]` — step-response metrics for one axis in the simulator, used to derive `config/arm.yaml`'s gains.
 
 - `scripts/idf.sh <idf.py args>` — run any `idf.py` subcommand (e.g. `build`, `menuconfig`, `size`) inside the official ESP-IDF v6.1 Docker image, with the repo mounted at `/project`. Requires Docker (or Colima) running, and the repo must live under `$HOME` so it can be mounted.

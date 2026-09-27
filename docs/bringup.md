@@ -53,21 +53,34 @@ Once all three work, move to the real hardware below.
 
 Each ESP32-S3 board is flashed with a single `CONFIG_AXIS_NODE_ID` (1–6, see `main/Kconfig.projbuild`
 and the `node:` field per axis in `config/arm.yaml`: 1 hip, 2 shoulder, 3 elbow, 4 wrist_bend,
-5 wrist_rotate, 6 gripper). Two ways to set it:
+5 wrist_rotate, 6 gripper). Use `scripts/build_node.sh`, one build directory per node:
 
 ```
-scripts/idf.sh menuconfig      # Robot arm axis -> CAN node id of this axis (1-6), then idf.py flash
+scripts/build_node.sh 3 build                        # -> build/node3 (idf.py in Docker)
+scripts/build_node.sh 3 flash -p /dev/cu.usbmodemXXXX
+scripts/build_node.sh 3 monitor -p /dev/cu.usbmodemXXXX
 ```
-or non-interactively, one `sdkconfig.defaults` (or `-D SDKCONFIG_DEFAULTS=...`) per board:
-```
-echo "CONFIG_AXIS_NODE_ID=3" > sdkconfig.defaults
-scripts/idf.sh build
-scripts/idf.sh -p <port> flash
-```
-`scripts/idf.sh` only runs `idf.py` inside Docker (build); flashing needs a serial port passed
-through to the container or `idf.py` run natively with ESP-IDF installed on the host — whichever
-is set up when the boards are in hand. Keep a written note of which physical board carries which
-node id; nothing on the board itself says so once flashed.
+
+Each node gets its own `build/nodeN/sdkconfig`, generated from the committed `sdkconfig.defaults`
+(USB-Serial-JTAG console, task-watchdog panic, MCPWM control in IRAM) plus a generated
+`build/nodeN/sdkconfig.node` holding `CONFIG_AXIS_NODE_ID=N`. Check it after a build:
+`grep AXIS_NODE_ID build/node3/sdkconfig`. The tracked top-level `sdkconfig` stays at node 1: it is
+what `scripts/idf.sh build`/`make firmware` and the VS Code ESP-IDF extension use. Do **not**
+`echo` into `sdkconfig.defaults` or set the node id in `menuconfig` for the top-level build. The
+existing `sdkconfig` overrides the defaults, and overwriting `sdkconfig.defaults` would drop the
+console/watchdog/IRAM settings.
+
+Flashing and the console need the board's USB serial port. Docker Desktop on macOS cannot pass
+USB serial ports into a container, so on macOS `flash` and `monitor` run on the host:
+- `flash` runs `uvx esptool --chip esp32s3 -p PORT ... write-flash @flash_args` inside
+  `build/nodeN` (the file lists the bootloader, partition table and app offsets of that build).
+  You can also run that command yourself from `build/nodeN`.
+- `monitor` runs `pyserial-miniterm` (`uvx --from pyserial`). Exit with Ctrl-].
+
+On Linux, both run `idf.py` in Docker with the port passed through (`--device`).
+
+Keep a written note of which physical board carries which node id. Nothing on the board itself
+says so once it is flashed.
 
 ## First power-up checklist
 
@@ -109,8 +122,8 @@ CSV. Watch `robotarm monitor` (or the CSV's `position` column) while it runs:
   wiring). Then:
   ```
   make gen-config       # regenerates components/axis_core/src/config_table.c from arm.yaml
-  scripts/idf.sh build
-  scripts/idf.sh -p <port> flash
+  scripts/build_node.sh <N> build
+  scripts/build_node.sh <N> flash -p <port>
   ```
   Re-run `identify` to confirm.
 
@@ -162,8 +175,27 @@ detection starts) and `AXIS_HOME_STALL_MS` (100 ms of stall evidence before the 
 found). If an axis homes too early (false stall from static friction) or too late/never (the
 stall threshold never trips), raise/lower that axis's `home.current_ma` first — it's a per-axis
 config value and needs no reflash-and-regenerate round trip beyond `make gen-config` +
-`scripts/idf.sh build`. Watch `robotarm monitor`'s `faults` column: a real jam should show
-`HOMING` stall-then-found; a timeout shows the axis still `HOMING` past `timeout_s`.
+`scripts/build_node.sh <N> build` + flash. Watch `robotarm monitor`'s `faults` column: a real jam
+should show `HOMING` stall-then-found; a timeout shows the axis still `HOMING` past `timeout_s`.
+
+Home **one axis at a time** during bring-up:
+```
+uv run robotarm axis home --node <N> --bus <URL>      # waits for READY + homed, then disables it again
+uv run robotarm axis clear --node <N> --bus <URL>     # after a fault: FAULT -> DISABLED
+uv run robotarm axis enable --node <N> --bus <URL> --hold 5   # enable and hold position for 5 s
+uv run robotarm axis disable --node <N> --bus <URL>
+```
+Each prints one line and exits 0, or prints one `error: ...` line (for example the fault that
+stopped homing, or a timeout) and exits 2. The homed flag survives the DISABLE at exit until the
+board resets, so axes homed one at a time are still homed when you start `robotarm teleop`.
+
+**Wrong direction during homing.** If the motor or encoder sign is wrong, homing drives *away*
+from `home.direction`. The velocity loop then winds up to `max_duty` and would hit the opposite
+stop and accept that stall as home. The firmware prevents this: after the first 50 ms of homing,
+moving against `home.direction` faster than half `home.velocity_deg_s` for 40 consecutive ms
+faults the axis with `HOMING` (`AXIS_HOME_DIR_GRACE_MS` / `AXIS_HOME_WRONG_DIR_MS` in `axis.h`).
+A `HOMING` fault within about 0.1 s of the start therefore means "check the signs" (see "Sign
+check per axis"), not "tune the homing".
 
 ## Gain retune with the real motors
 
@@ -184,7 +216,9 @@ uv run robotarm teleop --bus <URL>
 Hold **R1** (slow, 0.3x speed) for the first session. Keep a hand near a way to cut power (the
 E-STOP button, Circle, sends a CAN broadcast and works even if the PC itself locks up — but it is
 not a substitute for a physical kill switch on a first run with a real arm). Home one axis at a
-time if possible rather than all six with Triangle, until you trust each one's sign and limits.
+time with `robotarm axis home --node <N>` (see "Homing tuning") rather than all six with
+Triangle, until you trust each one's sign and limits. Use a USB cable for the controller, not
+Bluetooth (see "Losing the controller" in `docs/teleop.md`).
 
 ## "(assumed)" values in `config/arm.yaml` — measure on the robot
 
@@ -254,6 +288,20 @@ repo — they need the real board and, in a few cases, an oscilloscope:
   (`home.current_ma`) and any overcurrent threshold are being compared against a magnitude that
   can momentarily read near-zero right after a duty change even while the motor is still loaded,
   until the bridge is driving steadily again.
+
+  **Duty weighting (R31).** OCM follows the motor current only during the PWM on-phase and reads
+  ~0 in the off-phase. `hal_current.c` averages the ADC over each whole 1 ms tick, so the raw
+  average is `|i| × |duty|`. The control task converts it back with
+  `axis_motor_current_from_avg()` (`components/axis_core/include/axis/current_sense.h`), using
+  the duty applied during that millisecond: it divides by `|duty|` when `|duty| ≥ 0.1`. Below 0.1
+  it passes the raw average through unscaled, because dividing would only amplify ADC noise. The
+  result is clamped to 30 A. The simulator models the same raw average and uses the same helper,
+  so thresholds tuned in the sim mean the same thing on the board. Consequence: **below 10 % duty
+  the reported current under-reads** (by the factor `|duty|`). A stall at very small duty will
+  not trip `max_current_ma` or `home.current_ma` by current alone; the homing stall detector's
+  low-velocity criterion still catches it. For current-sense calibration, compare at a duty of
+  0.3 or more. Whether the average really scales with duty like this (OCM settling time, PWM
+  frequency vs. ADC sampling) needs a scope check on the real board.
 - **Compare-0 brake behaviour.** `hal_motor.c` assumes writing both MCPWM comparators to 0 drives
   both TB9051FTG inputs low, which the datasheet calls the brake state (both low, or IN1=IN2). Put
   a scope on PWM_A/PWM_B during a duty-0 command and during a stall trip to confirm both lines
@@ -272,6 +320,19 @@ repo — they need the real board and, in a few cases, an oscilloscope:
   currents this scale predicts for a stalled motor (`max_current_ma` per axis), and reduce the
   attenuation (or the resistor) if it does.
 - **Per-board node id build.** Each board needs its own `CONFIG_AXIS_NODE_ID` baked in at flash
-  time (see "Flashing each board" above); there is currently no other way to tell two flashed
+  time (`scripts/build_node.sh`, see "Flashing each board" above); there is currently no other way to tell two flashed
   boards apart (no serial number, no DIP switch), so a mislabeled board is silent until it
   responds to the wrong CAN node id.
+
+## Known limitations (open items)
+
+- **`identify` duty-edge labelling.** Each CSV row's `pwm_ticks` is the duty the host was
+  *commanding* when that STATUS+TELEMETRY pair arrived, not the duty the axis applied on that
+  tick. The recorded step edge can therefore be off by a few samples (up to the host's poll
+  latency, about 5 ms on real hardware). This matters for `stepfit` on short steps. Check the edge
+  against the position trace, or trim the first samples after it.
+- **Gamepad fast reconnect.** `Gamepad` forgets its device when SDL reports it removed, matching
+  on the SDL instance id. A pad that drops and reconnects very quickly (Bluetooth) might be
+  re-added before the removal is seen, or come back with a different instance id. The
+  consequences have not been observed on hardware. Teleop requires a fresh L1 press after any
+  loss either way, so the failure mode is "does not reconnect" (restart teleop), not "moves".

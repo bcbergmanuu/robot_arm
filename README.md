@@ -64,7 +64,8 @@ read that one first.
 
 One ESP32-S3 (Seeed XIAO) plus a [bcbergmanuu/dc-motor-driver](https://github.com/bcbergmanuu/dc-motor-driver)
 TB9051FTG H-bridge PCB per axis; each board is flashed with its own CAN node id (1-6, one per row
-in `config/arm.yaml`'s `axes:` list) via `CONFIG_AXIS_NODE_ID` (see `docs/bringup.md`).
+in `config/arm.yaml`'s `axes:` list) via `CONFIG_AXIS_NODE_ID`: `scripts/build_node.sh N build` /
+`scripts/build_node.sh N flash -p PORT` (see `docs/bringup.md`).
 
 | Signal | GPIO | Note |
 |---|---|---|
@@ -96,7 +97,9 @@ uv run robotarm gamepad-test                  # check a paired controller before
 uv run robotarm identify --bus sim --node 2 --duty 0.5   # open-loop step, sim or robot -> identify_node2.csv
 uv run robotarm stepfit identify_node2.csv --motor faulhaber_2224sr_12v --supply 12 --cpr 256
                                               # fit the bench motor model -> stepfit_identify_node2.yaml/.png
-scripts/idf.sh build                          # build the ESP32-S3 firmware in Docker (no flashing)
+scripts/idf.sh build                          # build the ESP32-S3 firmware in Docker (node 1, no flashing)
+scripts/build_node.sh 3 build                 # ...per board: node id 3 -> build/node3 (flash: see docs/bringup.md)
+uv run robotarm axis home --node 3 --bus <URL>   # bring-up: home/enable/disable/clear one axis
 ```
 
 `make sim` and `make teleop` are the two halves of one demo: run `make sim` in one terminal and
