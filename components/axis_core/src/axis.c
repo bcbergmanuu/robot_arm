@@ -91,6 +91,7 @@ static void handle_command(axis_t *a, uint8_t cmd) {
                 a->homed = false;
                 a->home_ms = 0;
                 a->stall_ms = 0;
+                a->wrong_dir_ms = 0;
                 reset_trajectory(a);
             }
             break;
@@ -216,6 +217,17 @@ static void run_homing(axis_t *a) {
     if (a->home_ms > cfg->home_timeout_ms) {
         enter_fault(a, AXIS_FAULT_HOMING);
         return;
+    }
+
+    /* R32: moving the wrong way = motor or encoder sign wrong; the velocity loop would wind up to
+     * max_duty into the opposite stop and accept that stall as home. */
+    if (a->home_ms > AXIS_HOME_DIR_GRACE_MS && (float)cfg->home_dir * a->vel < -0.5f * cfg->home_vel) {
+        if (++a->wrong_dir_ms >= AXIS_HOME_WRONG_DIR_MS) {
+            enter_fault(a, AXIS_FAULT_HOMING);
+            return;
+        }
+    } else {
+        a->wrong_dir_ms = 0;
     }
 
     if (a->home_ms > AXIS_HOME_SETTLE_MS &&

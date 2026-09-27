@@ -115,6 +115,32 @@ static void test_jammed_homing_still_faults_overcurrent(void) {
     TT_CHECK(ms <= AXIS_HOME_OC_GRACE_MS + (int)cfg.overcurrent_ms + 2);
 }
 
+/* R32: motor wired backwards (plant gain negated). Homing drives away from home_dir, the velocity
+ * loop winds up to max_duty (positive feedback) and would slam into the opposite stop, where the stall
+ * would be accepted as home. The direction guard must fault HOMING quickly instead, never homed. */
+static void test_reversed_motor_faults_homing_quickly(void) {
+    rig_t r; rig_init(&r, &TEST_CFG);
+    r.p.gain = -r.p.gain;
+    r.p.has_stop = 1; r.p.stop_pos = 3000.0; r.p.stop_dir = +1; /* the stop on the wrong side */
+    cmd(&r, PROTO_CMD_HOME);
+    int ms = 0;
+    while (r.a.state == AXIS_HOMING && ms < 2000) { run_ms(&r, 1); ms++; }
+    TT_CHECK(r.a.state == AXIS_FAULT && (r.a.faults & AXIS_FAULT_HOMING) && !r.a.homed);
+    TT_CHECK(ms <= AXIS_HOME_DIR_GRACE_MS + AXIS_HOME_WRONG_DIR_MS + 60);
+    TT_CHECK(r.p.pos < 3000.0); /* faulted before reaching the wrong-side stop */
+}
+
+/* Same with the encoder reversed instead: the axis sees itself moving the wrong way. */
+static void test_reversed_encoder_faults_homing_quickly(void) {
+    axis_config_t cfg = TEST_CFG; cfg.encoder_sign = -1;
+    rig_t r; rig_init(&r, &cfg);
+    cmd(&r, PROTO_CMD_HOME);
+    int ms = 0;
+    while (r.a.state == AXIS_HOMING && ms < 2000) { run_ms(&r, 1); ms++; }
+    TT_CHECK(r.a.state == AXIS_FAULT && (r.a.faults & AXIS_FAULT_HOMING) && !r.a.homed);
+    TT_CHECK(ms <= AXIS_HOME_DIR_GRACE_MS + AXIS_HOME_WRONG_DIR_MS + 60);
+}
+
 int main(void) {
     TT_RUN(test_homes_against_stop_and_backs_off);
     TT_RUN(test_homing_times_out_without_stop);
@@ -124,5 +150,7 @@ int main(void) {
     TT_RUN(test_no_velocity_spike_when_home_is_set);
     TT_RUN(test_homes_when_already_pressed_against_stop);
     TT_RUN(test_jammed_homing_still_faults_overcurrent);
+    TT_RUN(test_reversed_motor_faults_homing_quickly);
+    TT_RUN(test_reversed_encoder_faults_homing_quickly);
     return TT_DONE();
 }

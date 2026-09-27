@@ -37,6 +37,11 @@ typedef struct {
  * starts pressed against its stop can be recognised as stalled first. Bounded: afterwards the normal
  * overcurrent rule applies again (and home_timeout_ms still guards the whole sequence). */
 #define AXIS_HOME_OC_GRACE_MS (AXIS_HOME_SETTLE_MS + AXIS_HOME_STALL_MS + 100)
+/* R32: homing direction guard. After AXIS_HOME_DIR_GRACE_MS of HOMING, moving *against* home_dir
+ * faster than half home_vel for AXIS_HOME_WRONG_DIR_MS consecutive ms means the motor or encoder
+ * sign is wrong (positive feedback toward the opposite stop): FAULT_HOMING instead of a false home. */
+#define AXIS_HOME_DIR_GRACE_MS 50
+#define AXIS_HOME_WRONG_DIR_MS 40
 
 typedef struct {
     const axis_config_t *cfg;
@@ -53,7 +58,7 @@ typedef struct {
     float target;    /* counts | counts/s | duty, per sp_kind */
     float sp_pos, sp_vel; /* trajectory generator state */
     pidc_t pos_pid, vel_pid;
-    uint32_t ms_since_rx, overcurrent_ms, home_ms, stall_ms, tick;
+    uint32_t ms_since_rx, overcurrent_ms, home_ms, stall_ms, wrong_dir_ms, tick;
     float current_ma, duty;
     can_frame_t txq[AXIS_TX_QUEUE_LEN];
     uint8_t tx_head, tx_count;
