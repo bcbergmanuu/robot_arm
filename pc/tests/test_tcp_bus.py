@@ -47,18 +47,32 @@ def test_status_frames_arrive_over_tcp(running_sim):
         bus.shutdown()
 
 
+def wait_for_status(bus, node, pred, timeout=1.0):
+    """Ruling R3: poll STATUS frames from `node` until one satisfies `pred` (or the deadline);
+    returns the last STATUS seen, so a failing assert shows the state actually reached."""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        st = recv_status(bus, node, timeout=max(0.0, deadline - time.monotonic()))
+        if st is None:
+            break
+        last = st
+        if pred(st):
+            break
+    return last
+
+
 def test_disconnecting_master_trips_watchdog(running_sim):
     _, server = running_sim
     bus = TcpBus(f"127.0.0.1:{server.port}")
     bus.send(p.encode_command(p.NODE_BROADCAST, p.Command.ENABLE))
-    time.sleep(0.05)
-    assert recv_status(bus, 4).state == p.AxisState.READY
+    st = wait_for_status(bus, 4, lambda s: s.state == p.AxisState.READY)
+    assert st is not None and st.state == p.AxisState.READY
     bus.shutdown()                             # master "crashes"
-    time.sleep(0.4)
     bus2 = TcpBus(f"127.0.0.1:{server.port}")
     try:
-        st = recv_status(bus2, 4)
-        assert st.state == p.AxisState.FAULT and p.Fault.WATCHDOG in st.faults
+        st = wait_for_status(bus2, 4, lambda s: s.state == p.AxisState.FAULT, timeout=2.0)
+        assert st is not None and st.state == p.AxisState.FAULT and p.Fault.WATCHDOG in st.faults
     finally:
         bus2.shutdown()
 
