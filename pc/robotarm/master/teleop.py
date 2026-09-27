@@ -54,7 +54,7 @@ from typing import Any
 import can
 import yaml
 
-from robotarm.bus import open_bus
+from robotarm.bus import OPEN_ERRORS, open_bus
 from robotarm.config import ArmConfig, load_arm_config
 from robotarm.master.arm_client import ArmClient
 from robotarm.master.cli_util import fail as _fail
@@ -64,7 +64,6 @@ from robotarm.master.cli_util import runner_failure as _runner_failure
 from robotarm.master.gamepad import FakeGamepad, Gamepad, GamepadState
 from robotarm.master.kinematics import ARM_JOINTS, Kinematics, Pose
 from robotarm.protocol import AxisState, Fault
-from robotarm.transport.tcp_bus import SimNotRunningError
 
 DEFAULT_TELEOP_CONFIG_RELATIVE_PATH = "config/teleop.yaml"
 
@@ -374,8 +373,8 @@ def run_teleop(bus_url: str, mode: str, gamepad=None) -> int:
 
     try:
         bus = open_bus(bus_url)
-    except (SimNotRunningError, can.CanError, OSError, ValueError) as exc:
-        return _fail(str(exc))
+    except OPEN_ERRORS as exc:
+        return _fail(f"{bus_url}: {exc}")
     except KeyboardInterrupt:  # Ctrl-C during a slow open (our handler isn't installed yet)
         return 130
     try:

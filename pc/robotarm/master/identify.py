@@ -29,7 +29,7 @@ import yaml
 
 from robotarm import protocol
 from robotarm.analysis.steptest import PWM_TICK_MAX
-from robotarm.bus import open_bus
+from robotarm.bus import OPEN_ERRORS, open_bus
 from robotarm.config import ArmConfig, AxisConfig, load_arm_config
 from robotarm.master.arm_client import ArmClient
 from robotarm.master.cli_util import fail as _fail
@@ -37,7 +37,6 @@ from robotarm.master.cli_util import install_stop_handlers as _install_stop_hand
 from robotarm.master.cli_util import restore_handlers as _restore_handlers
 from robotarm.master.cli_util import runner_failure as _runner_failure
 from robotarm.protocol import AxisState
-from robotarm.transport.tcp_bus import SimNotRunningError
 
 _UPDATE_POLL_S = 0.001       # CLI loop sleep between IdentifyRun.update() calls
 _STATUS_TIMEOUT_S = 2.0      # wait for the first STATUS before checking the axis's state
@@ -181,8 +180,8 @@ def run_identify(bus_url: str, node: int, duty: float = 1.0, out: str | Path = "
 
     try:
         bus = open_bus(bus_url)
-    except (SimNotRunningError, can.CanError, OSError, ValueError) as exc:
-        return _fail(str(exc))
+    except OPEN_ERRORS as exc:
+        return _fail(f"{bus_url}: {exc}")
     except KeyboardInterrupt:  # Ctrl-C during a slow open (our handler isn't installed yet)
         return 130
 

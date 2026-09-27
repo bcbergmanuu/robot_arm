@@ -9,9 +9,13 @@ Schemes:
                           monitor`/tests that don't need a separate `robotarm
                           sim` process or a viewer.
   slcan:/dev/tty...[@N]   Real hardware via python-can (CAN bus at 1 Mbit/s).
-  gs_usb:0
-  socketcan:can0
-  pcan:PCAN_USBBUS1
+  gs_usb:0                (gs_usb: the channel is the adapter's integer index;
+  socketcan:can0          slcan and gs_usb need the python-can `serial` / `gs-usb`
+  pcan:PCAN_USBBUS1       extras, which pyproject.toml installs.)
+
+Opening a bus can fail in many ways (no adapter, missing backend library, bad
+channel): every CLI catches OPEN_ERRORS around open_bus() and prints a single
+`error: ...` line.
 
 Also registers the `robotarm monitor --bus URL` CLI command, which prints
 axis state/position/faults once a second until interrupted.
@@ -20,6 +24,8 @@ axis state/position/faults once a second until interrupted.
 from __future__ import annotations
 
 import argparse
+import gc
+import logging
 import math
 import sys
 import threading
@@ -31,11 +37,16 @@ from robotarm import protocol as p
 from robotarm.config import ArmConfig, load_arm_config
 from robotarm.sim.pacing import DEFAULT_CATCH_UP_CAP, steps_to_catch_up
 from robotarm.sim.world import SimBus, SimWorld
-from robotarm.transport.tcp_bus import SimNotRunningError, TcpBus
+from robotarm.transport.tcp_bus import TcpBus
 
 _REAL_INTERFACES = {"slcan", "gs_usb", "socketcan", "pcan"}
 _REAL_BITRATE = 1_000_000
 _PRINT_INTERVAL_S = 1.0
+
+# What open_bus() can raise for a bad URL or a missing/unplugged adapter: ValueError (bad URL or
+# channel), ImportError (backend library missing), OSError (incl. SimNotRunningError, serial port
+# errors), can.CanError (python-can's CanInitializationError, ...), TypeError (bad backend argument).
+OPEN_ERRORS: tuple[type[BaseException], ...] = (can.CanError, OSError, ValueError, TypeError, ImportError)
 
 
 def open_bus(url: str) -> can.BusABC:
@@ -47,9 +58,37 @@ def open_bus(url: str) -> can.BusABC:
 
     scheme, sep, channel = url.partition(":")
     if sep and scheme in _REAL_INTERFACES:
-        return can.Bus(interface=scheme, channel=channel, bitrate=_REAL_BITRATE)
+        return _open_real_bus(scheme, channel)
 
     raise ValueError(f"unknown bus URL scheme: {url!r}")
+
+
+def _open_real_bus(scheme: str, channel: str) -> can.BusABC:
+    kwargs: dict = {"interface": scheme, "channel": channel, "bitrate": _REAL_BITRATE}
+    if scheme == "gs_usb":
+        try:
+            kwargs["index"] = int(channel)  # python-can's gs_usb compares it with a device count
+        except ValueError:
+            raise ValueError(f"gs_usb channel must be the adapter index (e.g. gs_usb:0), got {channel!r}") from None
+
+    # A backend that fails half-way through its __init__ leaves a bus object whose __del__ logs
+    # "<Bus> was not properly shut down" once the exception (and its traceback) is released. Release
+    # it here, with python-can's logger quietened, so a failed open is just the one exception.
+    can_log = logging.getLogger("can")
+    level = can_log.level
+    can_log.setLevel(logging.ERROR)
+    try:
+        try:
+            return can.Bus(**kwargs)
+        except Exception as exc:  # noqa: BLE001 -- re-raised below, without the traceback
+            error = exc
+        error.__traceback__ = None
+        error.__context__ = None
+        error.__cause__ = None
+        gc.collect()
+        raise error
+    finally:
+        can_log.setLevel(level)
 
 
 class _RealtimeSimBus(SimBus):
@@ -105,8 +144,8 @@ def _print_status_lines(cfg: ArmConfig, latest: dict[int, p.Status]) -> None:
 def _run_monitor(args: argparse.Namespace) -> int:
     try:
         bus = open_bus(args.bus)
-    except (SimNotRunningError, can.CanError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except OPEN_ERRORS as exc:
+        print(f"error: {args.bus}: {exc}", file=sys.stderr)
         return 2
 
     cfg = load_arm_config()
