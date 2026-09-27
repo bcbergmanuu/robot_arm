@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -29,8 +30,12 @@ import yaml
 from robotarm import protocol
 from robotarm.analysis.steptest import PWM_TICK_MAX
 from robotarm.bus import open_bus
-from robotarm.config import load_arm_config
+from robotarm.config import ArmConfig, AxisConfig, load_arm_config
 from robotarm.master.arm_client import ArmClient
+from robotarm.master.cli_util import fail as _fail
+from robotarm.master.cli_util import install_stop_handlers as _install_stop_handlers
+from robotarm.master.cli_util import restore_handlers as _restore_handlers
+from robotarm.master.cli_util import runner_failure as _runner_failure
 from robotarm.protocol import AxisState
 from robotarm.transport.tcp_bus import SimNotRunningError
 
@@ -117,29 +122,30 @@ class IdentifyRun:
 # -- CLI -------------------------------------------------------------------------------
 
 
-def _fail(message: str) -> int:
-    print(f"error: {message}", file=sys.stderr)
-    return 2
-
-
-def _duty_refusal(axis, duty: float) -> str | None:
+def _duty_refusal(axis: AxisConfig, duty: float) -> str | None:
     """None if `duty` is within the axis's max_duty; otherwise the `error: ...` message."""
     if abs(duty) > axis.max_duty:
         return f"--duty {duty:g} exceeds axis {axis.name!r} max_duty {axis.max_duty:.3f}"
     return None
 
 
-def _state_refusal(axis, state: AxisState) -> str | None:
+def _state_refusal(axis: AxisConfig, state: AxisState) -> str | None:
     """None if `state` is DISABLED/READY (identify may proceed); otherwise the `error: ...` message."""
     if state not in (AxisState.DISABLED, AxisState.READY):
         return f"node {axis.node} ({axis.name}) is {state.name}: identify needs DISABLED or READY"
     return None
 
 
-def _wait_for_state(client: ArmClient, node: int, timeout_s: float = _STATUS_TIMEOUT_S) -> AxisState:
-    """Block (briefly) for the first STATUS from `node`, then return its axis state."""
+def _wait_for_state(client: ArmClient, node: int, stop: threading.Event,
+                     timeout_s: float = _STATUS_TIMEOUT_S) -> AxisState | None:
+    """Block (briefly) for the first STATUS from `node`, then return its axis state.
+
+    None if `stop` was set first (an operator abort, not a timeout -- the caller tells the
+    two apart). Raises TimeoutError if neither happens within `timeout_s`."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        if stop.is_set():
+            return None
         js = client.joints[node]
         if js.last_seen is not None:
             return js.state
@@ -149,9 +155,17 @@ def _wait_for_state(client: ArmClient, node: int, timeout_s: float = _STATUS_TIM
 
 def run_identify(bus_url: str, node: int, duty: float = 1.0, out: str | Path = "output.txt",
                   pre_s: float = 0.08, on_s: float = 0.08, post_s: float = 0.04) -> int:
-    """Body of `robotarm identify`. Returns the process exit code (0, or 2 with a single
-    `error: ...` line on stderr: bad config/bus, an axis not DISABLED/READY, or --duty
-    beyond the axis's max_duty)."""
+    """Body of `robotarm identify`. Returns the process exit code:
+
+    0 on a full recording, and also after Ctrl-C/SIGTERM once the run has started (matching
+    `robotarm teleop`'s convention) -- whatever was recorded up to that point is still written,
+    with a note on stderr that it's partial; 130 for Ctrl-C while the bus is still opening,
+    before the run started at all; 2 on any failure (bad config, bus open, an axis not
+    DISABLED/READY, --duty beyond the axis's max_duty, or the bus/runner dying mid-run),
+    reported as a single `error: ...` line on stderr.
+
+    On every exit path once the run has started, the axis is sent duty 0 then DISABLE
+    (best effort -- if the bus itself just died there is nothing left to send to)."""
     try:
         arm_cfg = load_arm_config()
     except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError) as exc:
@@ -169,33 +183,77 @@ def run_identify(bus_url: str, node: int, duty: float = 1.0, out: str | Path = "
         bus = open_bus(bus_url)
     except (SimNotRunningError, can.CanError, OSError, ValueError) as exc:
         return _fail(str(exc))
+    except KeyboardInterrupt:  # Ctrl-C during a slow open (our handler isn't installed yet)
+        return 130
 
     try:
-        client = ArmClient(bus, arm_cfg)
-        client.start()
+        stop = threading.Event()
+        old_handlers = _install_stop_handlers(stop)
         try:
-            try:
-                state = _wait_for_state(client, node)
-            except TimeoutError as exc:
-                return _fail(str(exc))
-            state_error = _state_refusal(axis, state)
-            if state_error is not None:
-                return _fail(state_error)
-
-            run = IdentifyRun(client, node, duty, pre_s=pre_s, on_s=on_s, post_s=post_s)
-            while not run.update(time.monotonic()):
-                time.sleep(_UPDATE_POLL_S)
+            return _identify_loop(bus, arm_cfg, axis, node, duty, out, pre_s, on_s, post_s, stop)
         finally:
-            client.close()
+            _restore_handlers(old_handlers)
     finally:
         bus.shutdown()
 
-    run.write_csv(out)
-    expected = round((pre_s + on_s + post_s) * 1000)
-    n = len(run.samples)
-    if n < _MIN_SAMPLE_FRACTION * expected:
-        print(f"warning: recorded {n} samples, expected ~{expected} at 1 kHz (dropped frames?)", file=sys.stderr)
-    print(f"wrote {out} ({n} samples, node {node} {axis.name!r}, duty {duty:g})")
+
+def _identify_loop(bus: can.BusABC, arm_cfg: ArmConfig, axis: AxisConfig, node: int, duty: float, out: str | Path,
+                    pre_s: float, on_s: float, post_s: float, stop: threading.Event) -> int:
+    client = ArmClient(bus, arm_cfg)
+    client.start()
+    run: IdentifyRun | None = None
+    aborted = False
+    failure: str | None = None
+    try:
+        try:
+            state = _wait_for_state(client, node, stop)
+        except TimeoutError as exc:
+            failure = str(exc)
+        else:
+            if state is None:
+                aborted = True  # stop was set while waiting for the first STATUS
+            else:
+                state_error = _state_refusal(axis, state)
+                if state_error is not None:
+                    failure = state_error
+                else:
+                    run = IdentifyRun(client, node, duty, pre_s=pre_s, on_s=on_s, post_s=post_s)
+                    try:
+                        while not run.update(time.monotonic()):
+                            if stop.is_set():
+                                aborted = True
+                                break
+                            if not client.alive():
+                                failure = _runner_failure(client.error)
+                                break
+                            time.sleep(_UPDATE_POLL_S)
+                    except (can.CanError, OSError) as exc:
+                        failure = f"bus lost: {exc}"
+    finally:
+        if aborted or failure is not None:
+            try:  # best effort: brake, then DISABLE, before ArmClient.close()'s own DISABLE broadcast
+                client.set_duty(node, 0.0)
+                client.disable([node])
+            except (can.CanError, OSError):
+                pass  # the bus is already gone; nothing left to send to
+        client.close()
+
+    n = len(run.samples) if run is not None else 0
+    if n:
+        run.write_csv(out)
+        if aborted or failure is not None:
+            print(f"partial recording: wrote {out} ({n} samples)", file=sys.stderr)
+        else:
+            expected = round((pre_s + on_s + post_s) * 1000)
+            if n < _MIN_SAMPLE_FRACTION * expected:
+                print(f"warning: recorded {n} samples, expected ~{expected} at 1 kHz (dropped frames?)",
+                      file=sys.stderr)
+            print(f"wrote {out} ({n} samples, node {node} {axis.name!r}, duty {duty:g})")
+    elif aborted or failure is not None:
+        print("no samples recorded", file=sys.stderr)
+
+    if failure is not None:
+        return _fail(failure)
     return 0
 
 

@@ -91,7 +91,14 @@ class ArmClient:
         decoded = protocol.decode(msg)
         if decoded is None:
             return
-        for listener in self._listeners:
+        # process() runs on whichever thread calls poll() (the caller's, or the background
+        # runner's); add_listener() may be called concurrently from another thread (e.g. the
+        # CLI thread, after client.start()) -- snapshot under the lock rather than iterating
+        # self._listeners directly, and call back outside it so a listener can itself touch
+        # ArmClient (e.g. read .joints) without risking a deadlock on this same lock.
+        with self._lock:
+            listeners = list(self._listeners)
+        for listener in listeners:
             listener(decoded)
         if isinstance(decoded, protocol.Status):
             self._on_status(decoded)
@@ -103,7 +110,8 @@ class ArmClient:
         """Register `callback(decoded)`, called from process() for every successfully
         decoded frame (Task 18: IdentifyRun uses this to timestamp raw STATUS/TELEMETRY
         pairs by tick index rather than by poll()'s `now`, see R26)."""
-        self._listeners.append(callback)
+        with self._lock:
+            self._listeners.append(callback)
 
     def keepalive(self, now: float) -> None:
         """Tell the client the application loop is alive (R23; see keepalive_timeout)."""

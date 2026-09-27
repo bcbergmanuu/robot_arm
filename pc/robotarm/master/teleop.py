@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import argparse
 import math
-import signal
 import sys
 import threading
 import time
@@ -58,6 +57,10 @@ import yaml
 from robotarm.bus import open_bus
 from robotarm.config import ArmConfig, load_arm_config
 from robotarm.master.arm_client import ArmClient
+from robotarm.master.cli_util import fail as _fail
+from robotarm.master.cli_util import install_stop_handlers as _install_stop_handlers
+from robotarm.master.cli_util import restore_handlers as _restore_handlers
+from robotarm.master.cli_util import runner_failure as _runner_failure
 from robotarm.master.gamepad import FakeGamepad, Gamepad, GamepadState
 from robotarm.master.kinematics import ARM_JOINTS, Kinematics, Pose
 from robotarm.protocol import AxisState, Fault
@@ -386,19 +389,6 @@ def run_teleop(bus_url: str, mode: str, gamepad=None) -> int:
         bus.shutdown()
 
 
-def _fail(message: str) -> int:
-    print(f"error: {message}", file=sys.stderr)
-    return 2
-
-
-def _runner_failure(error: BaseException | None) -> str:
-    if error is None:
-        return "bus lost: runner stopped"
-    if isinstance(error, (can.CanError, OSError)):
-        return f"bus lost: {error}"
-    return f"internal error: {error!r}"
-
-
 def _teleop_loop(bus: can.BusABC, arm_cfg: ArmConfig, cfg: TeleopConfig, mode: Mode, gamepad,
                  stop: threading.Event) -> int:
     client = ArmClient(bus, arm_cfg, keepalive_timeout=keepalive_timeout(cfg.loop_hz))
@@ -454,21 +444,6 @@ def _teleop_loop(bus: can.BusABC, arm_cfg: ArmConfig, cfg: TeleopConfig, mode: M
     if failure is not None:
         return _fail(failure)
     return 0
-
-
-def _install_stop_handlers(stop: threading.Event) -> dict[int, Any]:
-    if threading.current_thread() is not threading.main_thread():
-        return {}
-
-    def _on_signal(_signum, _frame) -> None:
-        stop.set()
-
-    return {sig: signal.signal(sig, _on_signal) for sig in (signal.SIGINT, signal.SIGTERM)}
-
-
-def _restore_handlers(old: dict[int, Any]) -> None:
-    for sig, handler in old.items():
-        signal.signal(sig, handler)
 
 
 def _run(args: argparse.Namespace) -> int:

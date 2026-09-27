@@ -1,12 +1,24 @@
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
 import pytest
 
 from robotarm import protocol as p
 from robotarm.analysis.steptest import load_step_csv
 from robotarm.config import load_arm_config
 from robotarm.master.arm_client import ArmClient
-from robotarm.master.identify import IdentifyRun, _duty_refusal, _state_refusal
+from robotarm.master.identify import IdentifyRun, _duty_refusal, _state_refusal, run_identify
 from robotarm.sim.harness import run_lockstep
+from robotarm.sim.server import SimServer, run_realtime
 from robotarm.sim.world import SimBus, SimWorld
+from robotarm.transport.tcp_bus import TcpBus
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 @pytest.fixture
@@ -56,7 +68,7 @@ def test_identify_records_step_csv(cfg, sim, tmp_path):
     positions = [s[1] for s in run.samples]
     pre_positions = positions[:pre_end]
     assert max(pre_positions) - min(pre_positions) <= 2  # flat (duty 0) during the pre-phase
-    assert abs(positions[on_end - 1] - positions[pre_end]) > 5  # moved during the on-phase
+    assert positions[on_end - 1] - positions[pre_end] > 5  # positive duty increases position
 
     csv_path = tmp_path / "output.csv"
     run.write_csv(csv_path)
@@ -94,3 +106,112 @@ def test_state_refusal_only_disabled_or_ready_allowed(cfg):
     assert _state_refusal(axis, p.AxisState.READY) is None
     assert _state_refusal(axis, p.AxisState.FAULT) is not None
     assert _state_refusal(axis, p.AxisState.HOMING) is not None
+
+
+# --- Fix round 1: run_identify (CLI body) end-to-end over a real-time TCP sim -------------
+
+
+@pytest.fixture
+def tcp_sim(cfg):
+    """A real-time SimServer + run_realtime thread, like robotarm.bus.open_bus's TcpBus target."""
+    world = SimWorld(cfg)
+    server = SimServer(world, port=0)
+    stop = threading.Event()
+    thread = threading.Thread(target=run_realtime, args=(world, server, False, stop), daemon=True)
+    thread.start()
+    yield server
+    stop.set()
+    thread.join(2)
+    server.close()
+    world.close()
+
+
+def test_run_identify_over_tcp_writes_readable_csv(tcp_sim, cfg, tmp_path):
+    axis = cfg.axis_by_name("shoulder")
+    out = tmp_path / "out.csv"
+    rc = run_identify(f"tcp://127.0.0.1:{tcp_sim.port}", axis.node, duty=axis.max_duty, out=out,
+                       pre_s=0.02, on_s=0.02, post_s=0.01)
+    assert rc == 0
+    data = load_step_csv(out)
+    assert len(data.pos) > 0
+    assert data.duty.max() == pytest.approx(axis.max_duty, abs=1e-6)
+
+
+def test_run_identify_exits_2_when_sim_goes_away(tcp_sim, cfg, tmp_path, capsys):
+    """The sim (server + realtime loop) disappears mid-run: the ArmClient runner dies on its
+    next heartbeat send, run_identify must report it as `error: bus lost: ...` and exit 2 --
+    not hang, and not leave a traceback on stderr."""
+    axis = cfg.axis_by_name("shoulder")
+    out = tmp_path / "out.csv"
+    result: dict[str, int] = {}
+
+    def target() -> None:
+        result["rc"] = run_identify(f"tcp://127.0.0.1:{tcp_sim.port}", axis.node, duty=axis.max_duty,
+                                    out=out, pre_s=0.05, on_s=2.0, post_s=0.05)
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    time.sleep(0.2)  # well past the state check, safely inside the 2 s on-phase
+    t0 = time.monotonic()
+    tcp_sim.close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert time.monotonic() - t0 < 1.0
+
+    assert result["rc"] == 2
+    err = capsys.readouterr().err
+    assert "error: bus lost:" in err and "Traceback" not in err
+    assert "partial recording" in err  # the samples recorded before the bus died were still written
+    assert load_step_csv(out).pos.size > 0
+
+
+def _start_identify_cli(port: int, out: Path, node: int, duty: float, on_s: float) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, "-m", "robotarm", "identify", "--bus", f"tcp://127.0.0.1:{port}",
+         "--node", str(node), "--duty", f"{duty:g}", "--out", str(out),
+         "--pre", "0.05", "--on", str(on_s), "--post", "0.05"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=REPO_ROOT,
+    )
+
+
+def _recv_status(bus: TcpBus, node: int, timeout: float) -> p.Status | None:
+    """The last STATUS seen from `node` within `timeout`, returning early once it's DISABLED."""
+    deadline = time.monotonic() + timeout
+    last: p.Status | None = None
+    while time.monotonic() < deadline:
+        msg = bus.recv(timeout=0.05)
+        decoded = p.decode(msg) if msg is not None else None
+        if isinstance(decoded, p.Status) and decoded.node == node:
+            last = decoded
+            if decoded.state == p.AxisState.DISABLED:
+                return decoded
+    return last
+
+
+def test_identify_cli_ctrl_c_exits_cleanly_with_partial_csv_and_disables(tcp_sim, cfg, tmp_path):
+    axis = cfg.axis_by_name("shoulder")
+    out = tmp_path / "partial.csv"
+    proc = _start_identify_cli(tcp_sim.port, out, axis.node, axis.max_duty, on_s=4.0)
+    try:
+        time.sleep(0.5)  # well past start-up/bus-open/state-check, safely inside the on-phase
+        proc.send_signal(signal.SIGINT)
+        _out, err = proc.communicate(timeout=5)
+        err = err.decode()
+        assert proc.returncode == 0, err
+        assert "Traceback" not in err
+        assert "partial recording" in err
+
+        assert out.exists()
+        data = load_step_csv(out)
+        assert len(data.pos) > 0
+
+        bus2 = TcpBus(f"127.0.0.1:{tcp_sim.port}")
+        try:
+            status = _recv_status(bus2, axis.node, timeout=2.0)
+            assert status is not None and status.state == p.AxisState.DISABLED
+        finally:
+            bus2.shutdown()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
