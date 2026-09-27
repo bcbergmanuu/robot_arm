@@ -22,6 +22,7 @@ _CLI_BUS_COMMANDS = [
     ["monitor"],
     ["teleop", "--fake-gamepad"],
     ["identify", "--node", "2"],
+    ["axis", "home", "--node", "2"],
 ]
 
 

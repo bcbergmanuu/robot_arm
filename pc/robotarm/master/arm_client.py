@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import can
 
@@ -263,6 +263,11 @@ class ArmClient:
         self._send(protocol.encode_setpoint(node, protocol.SetpointKind.DUTY, value))
 
     # -- queries ------------------------------------------------------------
+
+    def joint(self, node: int) -> JointState:
+        """A consistent copy of one node's JointState (safe to read while the runner updates it)."""
+        with self._lock:
+            return replace(self.joints[node])
 
     def all_ready(self) -> bool:
         with self._lock:
