@@ -253,3 +253,51 @@ def test_home_after_axes_sag_onto_their_stops(cfg, sim):
     run_lockstep(world, bus, 10.0, on_ms=client.poll)
     assert client.all_homed() and client.all_ready()
     assert not client.any_fault()
+
+
+class _ReentrancyDetectingBus:
+    """A fake bus whose send() records overlapping calls (two threads inside send at once).
+    Real python-can backends (slcan's serial writes, gs_usb's USB transfers) are not
+    guaranteed thread-safe, so ArmClient must serialise its own sends."""
+
+    def __init__(self) -> None:
+        self._inside = 0
+        self._guard = threading.Lock()
+        self.overlaps = 0
+        self.sent = 0
+
+    def send(self, msg, timeout=None) -> None:
+        with self._guard:
+            self._inside += 1
+            if self._inside > 1:
+                self.overlaps += 1
+        time.sleep(0.0002)  # widen the window a racing send would land in
+        with self._guard:
+            self._inside -= 1
+            self.sent += 1
+
+    def recv(self, timeout=None):
+        return None
+
+
+def test_concurrent_sends_from_runner_and_caller_do_not_interleave(cfg):
+    bus = _ReentrancyDetectingBus()
+    client = ArmClient(bus, cfg, heartbeat_hz=1e6)  # a HEARTBEAT on every poll
+    stop = threading.Event()
+
+    def heartbeats() -> None:
+        while not stop.is_set():
+            client.poll(time.monotonic())
+
+    t = threading.Thread(target=heartbeats)
+    t.start()
+    try:
+        node = cfg.axes[0].node
+        for _ in range(300):
+            client.set_velocity(node, 0.0)
+            client.enable([node])
+    finally:
+        stop.set()
+        t.join()
+    assert bus.sent > 600
+    assert bus.overlaps == 0

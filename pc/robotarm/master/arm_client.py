@@ -58,7 +58,11 @@ class ArmClient:
         seconds -- so a stalled application loop stops feeding the axis watchdogs
         even though this client's own poll()/runner keeps going. Same clock as poll() (R18).
         """
-        self.bus = bus  # bus.send is assumed thread-safe (SimBus/TcpBus and typical python-can backends are)
+        self.bus = bus
+        # Every send goes through _send() under this lock: the runner thread's HEARTBEATs and the
+        # caller's commands/setpoints would otherwise call bus.send concurrently, and real python-can
+        # backends (slcan serial writes, gs_usb USB transfers) are not guaranteed thread-safe.
+        self._send_lock = threading.Lock()
         self.cfg = cfg
         self._heartbeat_period_s = 1.0 / heartbeat_hz
         self._keepalive_timeout = keepalive_timeout
@@ -113,6 +117,10 @@ class ArmClient:
         with self._lock:
             self._listeners.append(callback)
 
+    def _send(self, msg: can.Message) -> None:
+        with self._send_lock:
+            self.bus.send(msg)
+
     def keepalive(self, now: float) -> None:
         """Tell the client the application loop is alive (R23; see keepalive_timeout)."""
         self._last_keepalive = now
@@ -127,7 +135,7 @@ class ArmClient:
         """Send a HEARTBEAT if due (and the keepalive is fresh), then drain bus.recv(timeout=0) into process()."""
         self._now = now
         if now - self._last_heartbeat_t >= self._heartbeat_period_s and self._keepalive_fresh(now):
-            self.bus.send(protocol.encode_heartbeat(self._seq))
+            self._send(protocol.encode_heartbeat(self._seq))
             self._seq = (self._seq + 1) & 0xFF
             self._last_heartbeat_t = now
         while True:
@@ -209,7 +217,7 @@ class ArmClient:
             self._thread.join(timeout=1.0)
             self._thread = None
         try:
-            self.bus.send(protocol.encode_command(protocol.NODE_BROADCAST, protocol.Command.DISABLE))
+            self._send(protocol.encode_command(protocol.NODE_BROADCAST, protocol.Command.DISABLE))
         except (can.CanError, OSError) as exc:
             if self.error is None:
                 self.error = exc
@@ -217,7 +225,7 @@ class ArmClient:
     # -- commands ----------------------------------------------------------
 
     def estop(self) -> None:
-        self.bus.send(protocol.encode_estop())
+        self._send(protocol.encode_estop())
 
     def enable(self, nodes: Iterable[int] | None = None) -> None:
         self._send_command(protocol.Command.ENABLE, nodes)
@@ -233,26 +241,26 @@ class ArmClient:
 
     def _send_command(self, cmd: protocol.Command, nodes: Iterable[int] | None) -> None:
         if nodes is None:
-            self.bus.send(protocol.encode_command(protocol.NODE_BROADCAST, cmd))
+            self._send(protocol.encode_command(protocol.NODE_BROADCAST, cmd))
         else:
             for node in nodes:
-                self.bus.send(protocol.encode_command(node, cmd))
+                self._send(protocol.encode_command(node, cmd))
 
     def set_velocity(self, node: int, rad_s: float) -> None:
         axis = self.cfg.axis(node)
         counts_per_s = round(rad_s * axis.counts_per_rad)
-        self.bus.send(protocol.encode_setpoint(node, protocol.SetpointKind.VELOCITY, counts_per_s))
+        self._send(protocol.encode_setpoint(node, protocol.SetpointKind.VELOCITY, counts_per_s))
 
     def set_position(self, node: int, rad: float) -> None:
         axis = self.cfg.axis(node)
         lo, hi = axis.soft_limits_rad
         clamped = min(max(rad, lo), hi)
-        self.bus.send(protocol.encode_setpoint(node, protocol.SetpointKind.POSITION, axis.rad_to_counts(clamped)))
+        self._send(protocol.encode_setpoint(node, protocol.SetpointKind.POSITION, axis.rad_to_counts(clamped)))
 
     def set_duty(self, node: int, duty: float) -> None:
         clamped = min(max(duty, -1.0), 1.0)
         value = round(clamped * protocol.DUTY_SCALE)
-        self.bus.send(protocol.encode_setpoint(node, protocol.SetpointKind.DUTY, value))
+        self._send(protocol.encode_setpoint(node, protocol.SetpointKind.DUTY, value))
 
     # -- queries ------------------------------------------------------------
 
