@@ -1,9 +1,11 @@
 #include "simaxis.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "axis/axis.h"
+#include "axis/current_sense.h"
 #include "axis/config_table.h"
 
 #define SIMAXIS_SUBSTEPS 10
@@ -13,8 +15,9 @@ struct simaxis {
     axis_t axis;
     motor_t motor;
     const axis_config_t *cfg;
-    float current_ma;     /* sensed current, averaged over the last tick's substeps;
-                            * fed as axis_inputs_t.current_ma on the *next* tick */
+    float current_ma;     /* sensed current of the last tick (R31: OCM average converted by
+                            * axis_motor_current_from_avg); fed as axis_inputs_t.current_ma on the
+                            * *next* tick, like the firmware's 1 ms ADC frame */
     float last_duty;      /* out.duty from the most recent axis_tick, for debug */
     double last_torque;   /* mean joint torque returned by the most recent simaxis_step */
     int encoder_started;  /* the incremental encoder counts from the pose at the first step */
@@ -79,15 +82,18 @@ double simaxis_step(simaxis_t *s, int n_ticks, double joint_q, double joint_qd) 
 
         float duty_hw = out.duty; /* terminal voltage command; already carries motor_sign once */
 
+        /* R31: the OCM pin only mirrors the current during the PWM on-phase (~0 in the off-phase),
+         * so the firmware's 1 ms ADC average is |i| * |duty|. Model that raw average, then convert it
+         * back with the same shared helper the firmware uses. */
         float current_sum = 0.0f;
         for (int k = 0; k < SIMAXIS_SUBSTEPS; k++) {
             float motor_torque = motor_step(&s->motor, duty_hw, omega_electrical, (float)SIMAXIS_SUBSTEP_DT);
             float joint_torque = motor_sign * motor_torque * gear_ratio * gear_efficiency;
             torque_sum += (double)joint_torque;
             substep_count++;
-            current_sum += motor_sensed_current_ma(&s->motor, duty_hw);
+            current_sum += motor_sensed_current_ma(&s->motor, duty_hw) * fabsf(duty_hw);
         }
-        s->current_ma = current_sum / (float)SIMAXIS_SUBSTEPS;
+        s->current_ma = axis_motor_current_from_avg(current_sum / (float)SIMAXIS_SUBSTEPS, duty_hw);
     }
 
     s->last_torque = substep_count ? torque_sum / (double)substep_count : 0.0;

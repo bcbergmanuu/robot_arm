@@ -4,6 +4,7 @@ set(AXIS_CORE_SRCS
     src/protocol.c
     src/config_table.c
     src/axis.c
+    src/current_sense.c
 )
 
 if(ESP_PLATFORM)

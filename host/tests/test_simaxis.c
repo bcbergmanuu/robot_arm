@@ -156,10 +156,38 @@ static void test_encoder_is_incremental_from_first_step(void) {
     }
 }
 
+/* R31: the OCM only mirrors the current during the PWM on-phase, so the sensor's 1 ms average is
+ * |i|*|duty|; simaxis models that and converts it back with axis_motor_current_from_avg, exactly like
+ * the firmware. Joint held still (stalled): i = duty*V/R. At duty 0.3 the sensor clips (2500 mV /
+ * 528 mV/A = 4735 mA) and the conversion recovers the clipped magnitude; at duty 0.05 (< 0.1) the raw
+ * average is reported unscaled, i.e. |i|*0.05. */
+static float stalled_sensed_current(int32_t duty_sp) {
+    motor_params_t motor = shoulder_motor();
+    simaxis_t *s = simaxis_create(2, &motor);
+    send_cmd(s, 2, PROTO_CMD_ENABLE);
+    send_sp(s, 2, PROTO_SP_DUTY, duty_sp);
+    for (int i = 0; i < 20; i++) simaxis_step(s, 1, 0.0, 0.0);
+    simaxis_debug_t dbg;
+    simaxis_get_debug(s, &dbg);
+    TT_CHECK(dbg.state == 2 /* AXIS_READY */);
+    simaxis_destroy(s);
+    return dbg.current_ma;
+}
+
+static void test_sensed_current_is_duty_weighted_average_converted_back(void) {
+    const float clip_ma = 2500.0f / 528.0f * 1000.0f;
+    TT_NEAR(stalled_sensed_current(3000), clip_ma, 5.0f);
+    TT_NEAR(stalled_sensed_current(-3000), clip_ma, 5.0f);
+    const float i_small = 0.05f * 24.0f / 1.14f * 1000.0f; /* 1053 mA, below the clip */
+    TT_NEAR(stalled_sensed_current(500), i_small * 0.05f, 2.0f);
+    TT_NEAR(stalled_sensed_current(0), 0.0f, 1e-3);
+}
+
 int main(void) {
     TT_RUN(test_unknown_node_returns_null);
     TT_RUN(test_duty_command_moves_joint_positive_within_a_second);
     TT_RUN(test_wiring_sign_variants_still_move_positive);
     TT_RUN(test_encoder_is_incremental_from_first_step);
+    TT_RUN(test_sensed_current_is_duty_weighted_average_converted_back);
     return TT_DONE();
 }

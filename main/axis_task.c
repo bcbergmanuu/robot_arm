@@ -3,6 +3,7 @@
 #include <stdatomic.h>
 
 #include "axis/axis.h"
+#include "axis/current_sense.h"
 #include "driver/gptimer.h"
 #include "esp_attr.h"
 #include "esp_check.h"
@@ -28,9 +29,10 @@
  *  - primary: the gptimer ISR counts ticks since the task last completed a loop body; beyond
  *    STALL_TICKS it trips hal_motor (both bridge inputs low, latched until reboot) and counts it. The
  *    control task notices the latch on its next iteration and injects a local ESTOP frame through
- *    axis_on_frame, once, so the axis reports FAULT/ESTOP on the bus instead of READY with a braked
- *    bridge (the loop body that trips will usually still be running -- the ISR only stalls the motor,
- *    not the task -- so this is normally the very next tick).
+ *    axis_on_frame whenever the trip is latched and the axis is not in FAULT (so a CLEAR_FAULT from the
+ *    master cannot bring a braked axis back to READY until reboot); the axis reports FAULT/ESTOP on the
+ *    bus instead of READY with a braked bridge (the loop body that trips will usually still be running
+ *    -- the ISR only stalls the motor, not the task -- so this is normally the very next tick).
  *  - secondary: the control task is subscribed to the task watchdog (CONFIG_ESP_TASK_WDT_TIMEOUT_S=1,
  *    CONFIG_ESP_TASK_WDT_PANIC=y), so a stall that also stops the ISR path resets the chip.
  *
@@ -40,6 +42,11 @@
  * bus), the telemetry current reads 32767 mA (the int16 clamp), and the status line counts it. In
  * HOMING a huge current would count as stall evidence and could latch a false home, so homing is
  * aborted instead with a local DISABLE command through the core's normal command path.
+ *
+ * Duty-weighted current (R31): the TB9051 OCM only mirrors the motor current during the PWM on-phase,
+ * so hal_current's 1 ms average is |i| * |duty|. Each fresh reading is converted back with the shared
+ * axis_motor_current_from_avg() using the duty that was applied during that window (the previous
+ * tick's output) -- the simulator uses the same helper.
  */
 
 #define TIMER_RES_HZ 1000000
@@ -59,7 +66,7 @@ static TaskHandle_t s_control_task;
 static atomic_uint s_isr_tick;  /* gptimer alarms since start */
 static atomic_uint s_done_tick; /* s_isr_tick value when the task last completed a loop body */
 static atomic_uint s_stall_trips;
-static bool s_estop_injected; /* control_task only: latches once axis_on_frame has been told about the trip */
+static float s_applied_duty;  /* control_task only: duty written to the bridge last tick (0 while tripped) */
 
 typedef struct {
     int32_t pos;
@@ -97,12 +104,13 @@ static float current_input(uint32_t *stale_ticks, uint32_t *last_seq, uint32_t *
     if (seq != *last_seq) {
         *last_seq = seq;
         *stale_ticks = 0;
-        return hal_current_ma();
+        return axis_motor_current_from_avg(hal_current_ma(), s_applied_duty);
     }
     if (*stale_ticks <= CURRENT_STALE_TICKS) { /* saturates at CURRENT_STALE_TICKS + 1 */
         (*stale_ticks)++;
         if (*stale_ticks <= CURRENT_STALE_TICKS) {
-            return hal_current_ma(); /* a few missed samples are harmless */
+            /* a few missed samples are harmless */
+            return axis_motor_current_from_avg(hal_current_ma(), s_applied_duty);
         }
         (*stale_events)++; /* just went stale */
     }
@@ -134,9 +142,9 @@ static void control_task(void *arg)
 
         /* hal_motor already forces the bridge to brake once tripped (see hal_motor.c); this makes the
          * axis core itself report FAULT/ESTOP on the bus instead of READY with a braked bridge, the
-         * first tick after the ISR latches the trip. */
-        if (hal_motor_tripped() && !s_estop_injected) {
-            s_estop_injected = true;
+         * first tick after the ISR latches the trip -- and again after any CLEAR_FAULT, since the trip
+         * stays latched until reboot. */
+        if (hal_motor_tripped() && s_axis.state != AXIS_FAULT) {
             can_frame_t estop;
             proto_encode_estop(&estop);
             axis_on_frame(&s_axis, &estop);
@@ -149,6 +157,7 @@ static void control_task(void *arg)
         axis_outputs_t out;
         axis_tick(&s_axis, &in, &out);
         hal_motor_set_duty(out.duty);
+        s_applied_duty = hal_motor_tripped() ? 0.0f : out.duty;
 
         while (axis_pop_tx(&s_axis, &f)) {
             hal_can_send(&f); /* drops are counted inside hal_can */
