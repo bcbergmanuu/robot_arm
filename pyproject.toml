@@ -1,0 +1,30 @@
+[project]
+name = "robotarm"
+version = "0.1.0"
+description = "Simulator and PlayStation teleop master for the Katana refurbish robot arm"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "mujoco>=3.2",
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "matplotlib>=3.9",
+    "python-can[gs-usb,serial]>=4.4",
+    "pygame>=2.6",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+robotarm = "robotarm.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "pc"
+
+[tool.pytest.ini_options]
+testpaths = ["pc/tests"]

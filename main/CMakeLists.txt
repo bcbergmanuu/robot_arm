@@ -1,4 +1,4 @@
-idf_component_register(SRCS "motion_control.c" "adc_continuous_read.c" "main.c" "motor_pid.c" "storage.c"
+idf_component_register(SRCS "main.c" "axis_task.c" "hal_motor.c" "hal_encoder.c" "hal_current.c" "hal_can.c"
                     INCLUDE_DIRS "."
-                    REQUIRES esp_driver_mcpwm bt nvs_flash esp_driver_pcnt esp_adc
+                    REQUIRES axis_core esp_driver_mcpwm esp_driver_pcnt esp_driver_gptimer esp_driver_twai esp_adc esp_timer
                     )

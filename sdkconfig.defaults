@@ -1,0 +1,10 @@
+# Console on the USB-Serial/JTAG port: GPIO43/44 (UART0 by default) carry the CAN transceiver.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Secondary stall guard: the axis control task feeds the task watchdog every tick; a stall resets the chip.
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=1
+
+# The stall trip writes the MCPWM comparators from the gptimer ISR: keep that path in IRAM.
+CONFIG_MCPWM_CTRL_FUNC_IN_IRAM=y
