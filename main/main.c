@@ -1,42 +1,27 @@
-#include <stdio.h>
-#include "motor_pid.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "adc_continuous_read.h"
-#include "main.h"
-#include "motion_control.h"
+#include <stdlib.h>
 
-TaskHandle_t taskHandle_adc = NULL, taskHandle_pid = NULL;  
+#include "axis/config_table.h"
+#include "axis_task.h"
+#include "esp_log.h"
+#include "hal_can.h"
+#include "hal_current.h"
+#include "hal_encoder.h"
+#include "hal_motor.h"
+#include "sdkconfig.h"
+
+static const char *TAG = "main";
 
 void app_main(void)
 {
-      xTaskCreate(
-            adc_run,
-            "current_adc",
-            4096,
-            NULL,
-            10,
-            &taskHandle_adc
-      );
+    const uint8_t node = CONFIG_AXIS_NODE_ID;
+    if (axis_config_for_node(node) == NULL) {
+        ESP_LOGE(TAG, "no axis config for node %u (CONFIG_AXIS_NODE_ID)", node);
+        abort();
+    }
 
-      xTaskCreate(
-            init_motor,
-            "current_adc",
-            4096,
-            NULL,
-            10,
-            &taskHandle_pid
-      );      
-
-      xTaskCreate(
-            start_motor,
-            "motor_ctrl",
-            4096,
-            NULL,
-            10,
-            NULL
-      ); 
-      vTaskDelay(portMAX_DELAY);
-      //Never call vTaskStartScheduler() in ESP32 applications because the Espressif ESP-IDF startup process starts the FreeRTOS scheduler automatically
+    hal_motor_init(); /* first, so the bridge inputs sit at brake while the rest comes up */
+    hal_encoder_init();
+    hal_current_init();
+    hal_can_init();
+    axis_task_start(node);
 }

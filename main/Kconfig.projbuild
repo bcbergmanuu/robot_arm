@@ -1,0 +1,11 @@
+menu "Robot arm axis"
+
+    config AXIS_NODE_ID
+        int "CAN node id of this axis (1-6)"
+        range 1 6
+        default 1
+        help
+            Selects this board's entry in the axis config table (components/axis_core) and its CAN node id.
+            Set it per board before flashing, e.g. `idf.py menuconfig` or `-D SDKCONFIG_DEFAULTS=...`.
+
+endmenu
