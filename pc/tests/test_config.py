@@ -45,3 +45,24 @@ def test_soft_limits_inside_hard_limits(cfg):
 def test_generated_c_table_is_up_to_date():
     result = subprocess.run([sys.executable, "-m", "robotarm", "gen-config", "--check"], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("path,value", [
+    (("motor_sign",), 0), (("motor_sign",), 2), (("encoder_sign",), -2), (("home", "direction"), 0),
+])
+def test_sign_fields_must_be_plus_or_minus_one(tmp_path, path, value):
+    import yaml
+
+    from robotarm.config import DEFAULT_CONFIG_RELATIVE_PATH, _repo_root
+
+    raw = yaml.safe_load((_repo_root() / DEFAULT_CONFIG_RELATIVE_PATH).read_text())
+    target = raw["axes"][2]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    bad = tmp_path / "arm.yaml"
+    bad.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError) as exc:
+        load_arm_config(bad)
+    msg = str(exc.value)
+    assert raw["axes"][2]["name"] in msg and ".".join(path) in msg

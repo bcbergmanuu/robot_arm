@@ -162,6 +162,15 @@ def _load_geometry(raw: dict) -> Geometry:
     )
 
 
+def _unit_sign(value, axis_name: str, field: str) -> int:
+    """motor_sign / encoder_sign / home.direction: exactly +1 or -1 (anything else silently breaks
+    the firmware's sign handling -- 0 would zero the motor output or freeze the position)."""
+    sign = int(value)
+    if sign not in (1, -1) or sign != value:
+        raise ValueError(f"axis {axis_name!r}: {field} must be +1 or -1, got {value!r}")
+    return sign
+
+
 def _load_axis(
     ax: dict,
     motors: dict[str, MotorConfig],
@@ -201,7 +210,7 @@ def _load_axis(
     )
 
     home_raw = ax["home"]
-    direction = int(home_raw["direction"])
+    direction = _unit_sign(home_raw["direction"], name, "home.direction")
     if "position_deg" in home_raw:
         position_rad = math.radians(float(home_raw["position_deg"]))
     else:
@@ -225,8 +234,8 @@ def _load_axis(
         encoder_cpr=int(ax["encoder_cpr"]),
         gear_ratio=float(ax["gear_ratio"]),
         motor=motor,
-        motor_sign=int(ax["motor_sign"]),
-        encoder_sign=int(ax["encoder_sign"]),
+        motor_sign=_unit_sign(ax["motor_sign"], name, "motor_sign"),
+        encoder_sign=_unit_sign(ax["encoder_sign"], name, "encoder_sign"),
         soft_limits_rad=soft_limits_rad,
         hard_limits_rad=hard_limits_rad,
         max_velocity_rad_s=math.radians(float(ax["max_velocity_deg_s"])),
