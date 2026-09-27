@@ -230,3 +230,45 @@ def test_identify_default_out_is_a_scratch_name_not_output_txt(tcp_sim, cfg, tmp
     assert rc == 0
     assert (tmp_path / f"identify_node{axis.node}.csv").exists()
     assert not (tmp_path / "output.txt").exists()
+
+
+def test_identify_heartbeats_are_keepalive_gated(tcp_sim, cfg, tmp_path, monkeypatch):
+    """Like teleop (R23): the runner's HEARTBEATs must stop if the identify loop stalls, so the
+    client is built with a keepalive timeout and the loop checks in on every iteration."""
+    import robotarm.master.identify as identify_mod
+
+    created = []
+
+    class RecordingClient(identify_mod.ArmClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.keepalives = 0
+            created.append(self)
+
+        def keepalive(self, now):
+            self.keepalives += 1
+            super().keepalive(now)
+
+    monkeypatch.setattr(identify_mod, "ArmClient", RecordingClient)
+    axis = cfg.axis_by_name("shoulder")
+    rc = run_identify(f"tcp://127.0.0.1:{tcp_sim.port}", axis.node, duty=axis.max_duty, out=tmp_path / "o.csv",
+                      pre_s=0.02, on_s=0.02, post_s=0.01)
+    assert rc == 0
+    (client,) = created
+    assert client._keepalive_timeout is not None and client._keepalive_timeout <= 0.2
+    assert client.keepalives >= 10
+
+
+def test_identify_internal_error_is_one_line(tcp_sim, cfg, tmp_path, monkeypatch, capsys):
+    import robotarm.master.identify as identify_mod
+
+    def boom(self, now):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(identify_mod.IdentifyRun, "update", boom)
+    axis = cfg.axis_by_name("shoulder")
+    rc = run_identify(f"tcp://127.0.0.1:{tcp_sim.port}", axis.node, duty=axis.max_duty, out=tmp_path / "o.csv")
+    assert rc == 2
+    err = capsys.readouterr().err.strip().splitlines()
+    assert err[-1].startswith("error: internal error:") and "kaboom" in err[-1]
+    assert not any("Traceback" in line for line in err)

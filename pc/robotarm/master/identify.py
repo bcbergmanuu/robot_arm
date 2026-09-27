@@ -41,6 +41,7 @@ from robotarm.protocol import AxisState
 _UPDATE_POLL_S = 0.001       # CLI loop sleep between IdentifyRun.update() calls
 _STATUS_TIMEOUT_S = 2.0      # wait for the first STATUS before checking the axis's state
 _MIN_SAMPLE_FRACTION = 0.9   # warn if fewer than this fraction of the expected 1 kHz samples arrive
+_KEEPALIVE_TIMEOUT_S = 0.1   # R23, like teleop: a stalled identify loop stops the HEARTBEATs
 
 
 class IdentifyRun:
@@ -143,6 +144,7 @@ def _wait_for_state(client: ArmClient, node: int, stop: threading.Event,
     two apart). Raises TimeoutError if neither happens within `timeout_s`."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        client.keepalive(time.monotonic())
         if stop.is_set():
             return None
         js = client.joints[node]
@@ -165,7 +167,7 @@ def run_identify(bus_url: str, node: int, duty: float = 1.0, out: str | Path | N
     `robotarm teleop`'s convention) -- whatever was recorded up to that point is still written,
     with a note on stderr that it's partial; 130 for Ctrl-C while the bus is still opening,
     before the run started at all; 2 on any failure (bad config, bus open, an axis not
-    DISABLED/READY, --duty beyond the axis's max_duty, or the bus/runner dying mid-run),
+    DISABLED/READY, --duty beyond the axis's max_duty, the bus/runner dying mid-run, or an internal error),
     reported as a single `error: ...` line on stderr.
 
     On every exit path once the run has started, the axis is sent duty 0 then DISABLE
@@ -207,7 +209,8 @@ def run_identify(bus_url: str, node: int, duty: float = 1.0, out: str | Path | N
 
 def _identify_loop(bus: can.BusABC, arm_cfg: ArmConfig, axis: AxisConfig, node: int, duty: float, out: str | Path,
                     pre_s: float, on_s: float, post_s: float, stop: threading.Event) -> int:
-    client = ArmClient(bus, arm_cfg)
+    client = ArmClient(bus, arm_cfg, keepalive_timeout=_KEEPALIVE_TIMEOUT_S)
+    client.keepalive(time.monotonic())
     client.start()
     run: IdentifyRun | None = None
     aborted = False
@@ -227,7 +230,11 @@ def _identify_loop(bus: can.BusABC, arm_cfg: ArmConfig, axis: AxisConfig, node: 
                 else:
                     run = IdentifyRun(client, node, duty, pre_s=pre_s, on_s=on_s, post_s=post_s)
                     try:
-                        while not run.update(time.monotonic()):
+                        while True:
+                            now = time.monotonic()
+                            client.keepalive(now)  # first thing each iteration (R23)
+                            if run.update(now):
+                                break
                             if stop.is_set():
                                 aborted = True
                                 break
@@ -237,6 +244,8 @@ def _identify_loop(bus: can.BusABC, arm_cfg: ArmConfig, axis: AxisConfig, node: 
                             time.sleep(_UPDATE_POLL_S)
                     except (can.CanError, OSError) as exc:
                         failure = f"bus lost: {exc}"
+    except Exception as exc:  # noqa: BLE001 -- a bug: still one `error:` line, still cleaned up below
+        failure = f"internal error: {exc!r}"
     finally:
         if aborted or failure is not None:
             try:  # best effort: brake, then DISABLE, before ArmClient.close()'s own DISABLE broadcast
