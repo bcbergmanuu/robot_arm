@@ -9,8 +9,14 @@ TTY_FLAG=""
 if [ -t 0 ]; then
     TTY_FLAG="-it"
 fi
-# $TTY_FLAG is intentionally unquoted below: it is always either empty or the literal `-it` (no
+# IDF_DOCKER_DEVICE (optional, Linux): a serial port to pass into the container for flash/monitor
+# (scripts/build_node.sh sets it from -p PORT). Docker Desktop on macOS cannot do this.
+DEVICE_FLAG=""
+if [ -n "${IDF_DOCKER_DEVICE:-}" ]; then
+    DEVICE_FLAG="--device=${IDF_DOCKER_DEVICE}"
+fi
+# $TTY_FLAG / $DEVICE_FLAG are intentionally unquoted below: each is always either empty or a single word (no
 # spaces/globs to mis-split), and this avoids an `unbound variable`/empty-array pitfall under
 # `set -u` with macOS's default bash 3.2.
-exec docker run --rm $TTY_FLAG -v "$ROOT":/project -w /project -e HOME=/tmp \
+exec docker run --rm $TTY_FLAG $DEVICE_FLAG -v "$ROOT":/project -w /project -e HOME=/tmp \
     espressif/idf:v6.1 idf.py "$@"
