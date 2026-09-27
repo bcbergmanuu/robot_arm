@@ -64,7 +64,7 @@ components/axis_core/             portable C core (IDF component AND host static
 host/                            host CMake project (build/host/, via `make host`)
   CMakeLists.txt
   tests/{tinytest.h,test_config.h,rig.h,plant.h,test_*.c}   (ctest per host/CMakeLists.txt's axis_test())
-  sim/{motor_model,bench,simaxis,simlib_api}.{c,h}       -> build/host/libsimaxis.{dylib,so}
+  sim/{motor_model,bench,simaxis}.{c,h} sim/simlib_api.c (no .h; ctypes entry points only)       -> build/host/libsimaxis.{dylib,so}
 config/arm.yaml, config/teleop.yaml, config/bench_identified.yaml
 pc/robotarm/                    python package (uv project at repo root: pyproject.toml)
   config.py protocol.py bus.py cli.py __main__.py

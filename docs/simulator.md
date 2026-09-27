@@ -213,8 +213,16 @@ uv run robotarm stepfit output.txt --motor <name> --supply <V> --cpr <4 × lines
 
 Once the arm is back, run this on a known axis with a known motor, encoder and supply, then
 refit `J`, `b`, `T_c` per axis and replace the `(assumed)` friction values in `config/arm.yaml`
-with the results referred to the joint (`× gear_ratio` for torques, `× gear_ratio²` for `J`
-and `b`).
+with the results referred to the joint: motor-shaft values scale up by the gear ratio when
+reflected to the joint (`× gear_ratio` for torques i.e. `T_c`, `× gear_ratio²` for inertias and
+viscous coefficients i.e. `J` and `b` — see `armature = motor.j_rotor * gear_ratio**2` in
+`pc/robotarm/sim/model.py`). `config/arm.yaml`'s `friction:` block is joint-side and only has
+`coulomb_nm`/`viscous_nm_s` (no inertia field): the rotor's own inertia is already reflected into
+MuJoCo's joint `armature` straight from `motors.*.j_rotor` × `gear_ratio²` in the config, not from
+a fit, so in practice only `b_viscous` and `tau_coulomb` from a fit actually replace anything in
+`arm.yaml` (via `friction.viscous_nm_s` and `friction.coulomb_nm`) — `j_total` is only a sanity
+check against the config's own `j_rotor`. Apply `gear_efficiency` too if the fit was done
+electrically (torque in vs. torque delivered at the joint differ by that factor).
 
 ## Gain tuning in simulation
 

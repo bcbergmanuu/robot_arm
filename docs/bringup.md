@@ -120,9 +120,13 @@ CSV. Watch `robotarm monitor` (or the CSV's `position` column) while it runs:
 open question below). To calibrate: drive a **known**, steady current through the motor (e.g. hold
 it stalled against a soft limit at a small duty, or use a bench supply with its own ammeter) and
 compare against the `current_ma` telemetry (`robotarm monitor`, or the `current` column from
-`identify`'s CSV). If the ratio between the true current and the reported one isn't 1.0, scale
-`mv_per_a` by that ratio (higher reported current than real ⇒ increase `mv_per_a`; the ADC-to-mA
-conversion is `current_ma = adc_mv / mv_per_a * 1000`) and rerun `make gen-config` + reflash.
+`identify`'s CSV). If the reported current doesn't match the true current, correct `mv_per_a`
+(the ADC-to-mA conversion is `current_ma = adc_mv / mv_per_a * 1000`, so `current_ma` is inversely
+proportional to `mv_per_a`):
+```
+mv_per_a_new = mv_per_a_old × (reported_current / true_current)
+```
+and rerun `make gen-config` + reflash.
 
 ## Per-axis identification and friction fit
 
@@ -134,10 +138,18 @@ uv run robotarm identify --bus <URL> --node <N> --duty 1.0 --out output_<axis>.t
 uv run robotarm stepfit output_<axis>.txt --motor <real-motor-name> --supply <V> \
     --cpr <4 x encoder lines> --plot docs/img/stepfit_<axis>.png --out config/bench_identified_<axis>.yaml
 ```
-Then transfer `j_total`, `b_viscous`, `tau_coulomb` from the fit (referred to the *joint*: divide
-`j_total`/`b_viscous` by `gear_ratio²` and `tau_coulomb` by `gear_ratio`, then apply
-`gear_efficiency`) into that axis's `friction:` block in `config/arm.yaml`, replacing the
-placeholder numbers. Repeat per axis — every axis currently shares friction numbers derived from
+`stepfit` fits `j_total`, `b_viscous`, `tau_coulomb` on the *motor shaft*; referred to the joint
+they scale **up** by the gear ratio (motor-shaft values are the small ones): `× gear_ratio²` for
+`j_total`/`b_viscous`, `× gear_ratio` for `tau_coulomb` (see `docs/simulator.md`'s "Redoing this on
+the robot" section and `armature = motor.j_rotor * gear_ratio**2` in `pc/robotarm/sim/model.py`).
+`config/arm.yaml`'s `friction:` block is already joint-side and has no inertia field — the
+rotor's own inertia is reflected into MuJoCo's joint `armature` straight from the config's
+`motors.*.j_rotor` × `gear_ratio²`, not from a fit — so in practice only `b_viscous` and
+`tau_coulomb` (→ `friction.viscous_nm_s` and `friction.coulomb_nm`) actually get transferred into
+that axis's `friction:` block in `config/arm.yaml`, replacing the placeholder numbers; `j_total`
+is a sanity check against the config's own `j_rotor`, not a value to write anywhere. Apply
+`gear_efficiency` too if the fit was done electrically (torque in vs. torque delivered at the
+joint differ by that factor). Repeat per axis — every axis currently shares friction numbers derived from
 one bench recording of unknown provenance (see Ruling R10 / "(assumed)" list below), not six real
 fits.
 
@@ -231,6 +243,17 @@ repo — they need the real board and, in a few cases, an oscilloscope:
 - **`motor_sign`/`encoder_sign` per axis.** All six axes currently default to `motor_sign: 1,
   encoder_sign: 1` in `config/arm.yaml` — nobody has confirmed any of them yet. Run the sign check
   above per axis before trusting direction.
+- **The OCM current signal is magnitude-only, and only valid while the bridge drives.** The
+  TB9051FTG's OCM output is a *magnitude* of motor current with no sign, and it only reflects
+  current while the bridge is actively driving (duty ≠ 0) — during brake (duty 0, both inputs low)
+  the sensed current reads ~0 regardless of any back-EMF/decay current actually still flowing in
+  the winding. This is why `axis_core`'s cascade dropped torque (current) as a closed *signed*
+  loop entirely (`docs/architecture.md`'s Decisions #1): current is only used open-loop, for
+  overcurrent protection, homing stall detection, and telemetry — all of which only need a
+  magnitude and only care about it while driving. It also means homing's stall threshold
+  (`home.current_ma`) and any overcurrent threshold are being compared against a magnitude that
+  can momentarily read near-zero right after a duty change even while the motor is still loaded,
+  until the bridge is driving steadily again.
 - **Compare-0 brake behaviour.** `hal_motor.c` assumes writing both MCPWM comparators to 0 drives
   both TB9051FTG inputs low, which the datasheet calls the brake state (both low, or IN1=IN2). Put
   a scope on PWM_A/PWM_B during a duty-0 command and during a stall trip to confirm both lines
