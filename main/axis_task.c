@@ -26,7 +26,11 @@
  * Two independent layers stop the motor if the control task stalls (the axis core can only zero the
  * duty while it is running):
  *  - primary: the gptimer ISR counts ticks since the task last completed a loop body; beyond
- *    STALL_TICKS it trips hal_motor (both bridge inputs low, latched until reboot) and counts it.
+ *    STALL_TICKS it trips hal_motor (both bridge inputs low, latched until reboot) and counts it. The
+ *    control task notices the latch on its next iteration and injects a local ESTOP frame through
+ *    axis_on_frame, once, so the axis reports FAULT/ESTOP on the bus instead of READY with a braked
+ *    bridge (the loop body that trips will usually still be running -- the ISR only stalls the motor,
+ *    not the task -- so this is normally the very next tick).
  *  - secondary: the control task is subscribed to the task watchdog (CONFIG_ESP_TASK_WDT_TIMEOUT_S=1,
  *    CONFIG_ESP_TASK_WDT_PANIC=y), so a stall that also stops the ISR path resets the chip.
  *
@@ -55,6 +59,7 @@ static TaskHandle_t s_control_task;
 static atomic_uint s_isr_tick;  /* gptimer alarms since start */
 static atomic_uint s_done_tick; /* s_isr_tick value when the task last completed a loop body */
 static atomic_uint s_stall_trips;
+static bool s_estop_injected; /* control_task only: latches once axis_on_frame has been told about the trip */
 
 typedef struct {
     int32_t pos;
@@ -125,6 +130,16 @@ static void control_task(void *arg)
         can_frame_t f;
         while (hal_can_recv(&f)) {
             axis_on_frame(&s_axis, &f);
+        }
+
+        /* hal_motor already forces the bridge to brake once tripped (see hal_motor.c); this makes the
+         * axis core itself report FAULT/ESTOP on the bus instead of READY with a braked bridge, the
+         * first tick after the ISR latches the trip. */
+        if (hal_motor_tripped() && !s_estop_injected) {
+            s_estop_injected = true;
+            can_frame_t estop;
+            proto_encode_estop(&estop);
+            axis_on_frame(&s_axis, &estop);
         }
 
         axis_inputs_t in = {

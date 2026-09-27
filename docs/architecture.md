@@ -26,7 +26,7 @@ Why the master is on a PC/Pi and not on an ESP32-S3: the S3 only has Bluetooth L
 5. **Safety lives in the axis**: command watchdog (200 ms), soft limits, following-error fault, overcurrent fault (not counted during the first 500 ms of HOMING, so an axis that starts pressed against its stop is recognised as stalled first), broadcast E-STOP. The master adds deadman (L1) and gamepad-loss handling.
 6. **Simulator:** MuJoCo for rigid-body arm dynamics (gravity, joint friction, mechanical stops as joint limits, reflected rotor inertia as joint `armature`); the DC motor electrical model and the six axis cores run in C (`libsimaxis`) called once per 1 ms step via ctypes.
 7. **Sim ↔ master transport:** in-process `SimBus` (lockstep, deterministic — used by tests) and a TCP bus (`TcpBus`, 13-byte frames) so the simulator (with viewer) and the teleop run as separate processes. On the robot the master uses `slcan`/`gs_usb`/`socketcan` through `python-can`.
-8. **Firmware bench identification** (open-loop duty step, currently hard-coded in `motor_pid.c`) becomes a protocol feature: `SETPOINT kind=DUTY`, telemetry at 1 kHz in duty mode, recorded by `robotarm identify` on sim or robot.
+8. **Firmware bench identification** (open-loop duty step, hard-coded in the original firmware's `motor_pid.c`, since deleted along with the rest of the pre-rewrite `main/` in favour of the HAL split below) becomes a protocol feature: `SETPOINT kind=DUTY`, telemetry at 1 kHz in duty mode, recorded by `robotarm identify` on sim or robot.
 
 ### CAN protocol (1 Mbit/s, 11-bit IDs, little-endian)
 
@@ -45,28 +45,37 @@ States: 0 DISABLED, 1 HOMING, 2 READY, 3 FAULT. Faults bitmask: 1 WATCHDOG, 2 OV
 
 See `docs/protocol.md` for the full protocol reference (message framing, timing guarantees, and worked examples) once it lands.
 
-### Repository layout after this plan
+### Repository layout (final state)
 
 ```
 CMakeLists.txt                  ESP-IDF project (unchanged role; VS Code IDF setup keeps working)
-main/                           ESP32 shell: board.h, hal_*.c, axis_task.c, main.c, Kconfig.projbuild
-components/axis_core/           portable C core (IDF component AND host static lib)
-  include/axis/{pid,protocol,axis_config,config_table,axis}.h
-  src/{pid,protocol,axis,config_table}.c        (config_table.c is generated)
-host/                           host CMake project
+main/                            ESP32 shell (each board flashed with its own CONFIG_AXIS_NODE_ID)
+  board.h                          pinout (main/board.h, see the README's Software section for the table)
+  Kconfig.projbuild                CONFIG_AXIS_NODE_ID (1-6)
+  hal_motor.{c,h}                  TB9051FTG H-bridge via MCPWM (duty -> two compare registers)
+  hal_encoder.{c,h}                quadrature encoder via PCNT (x4 decode)
+  hal_current.{c,h}                OCM current sense via ADC continuous mode
+  hal_can.{c,h}                    TWAI (CAN), RX ISR + queue, TX task off the control path, bus-off recovery
+  axis_task.{c,h}                  1 kHz control loop (gptimer ISR), stall watchdog, task WDT, status log
+  main.c                           app_main: hal_*_init, axis_task_start
+components/axis_core/             portable C core (IDF component AND host static lib)
+  include/axis/{pid,protocol,axis_config,config_table,axis,version}.h
+  src/{pid,protocol,axis,config_table,version}.c        (config_table.c is generated, committed)
+host/                            host CMake project (build/host/, via `make host`)
   CMakeLists.txt
-  tests/{tinytest.h,test_config.h,test_*.c}
-  sim/{motor_model,bench,simaxis}.{c,h}       → build/host/libsimaxis.{dylib,so}
+  tests/{tinytest.h,test_config.h,rig.h,plant.h,test_*.c}   (ctest per host/CMakeLists.txt's axis_test())
+  sim/{motor_model,bench,simaxis,simlib_api}.{c,h}       -> build/host/libsimaxis.{dylib,so}
 config/arm.yaml, config/teleop.yaml, config/bench_identified.yaml
 pc/robotarm/                    python package (uv project at repo root: pyproject.toml)
   config.py protocol.py bus.py cli.py __main__.py
   transport/tcp_bus.py
-  sim/{native,model,world,harness,server}.py
-  master/{arm_client,gamepad,teleop,kinematics,identify}.py
+  sim/{native,model,world,harness,server,pacing,tune}.py
+  master/{arm_client,gamepad,teleop,kinematics,identify,cli_util}.py
   analysis/steptest.py
   tools/gen_config.py
-pc/tests/                       pytest suite
-scripts/idf.sh                  docker wrapper for idf.py
+pc/tests/                       pytest suite (mirrors pc/robotarm/*, run via `make pytest`)
+scripts/idf.sh                  docker wrapper for idf.py (build only; flashing needs a serial port)
+scripts/sim.sh                  what `make sim` runs: sets up mjpython/DYLD_LIBRARY_PATH on macOS
 Makefile                        host / test / firmware / sim / teleop
 docs/architecture.md docs/protocol.md docs/simulator.md docs/teleop.md docs/bringup.md
 ```
@@ -83,10 +92,17 @@ Build and test everything through the `Makefile` targets:
 | `make test` | Runs `ctest` and `pytest` — the required gate before every commit. |
 | `make gen-config` | Runs `uv run robotarm gen-config` to regenerate `components/axis_core/src/config_table.c` from `config/arm.yaml`. |
 | `make firmware` | Builds the ESP32-S3 firmware via `scripts/idf.sh build` (Docker, `espressif/idf:v6.1`). |
-| `make sim` | Launches the MuJoCo simulator (`uv run mjpython -m robotarm sim`; `mjpython` is required for the viewer on macOS). |
+| `make sim` | Launches the MuJoCo simulator (`scripts/sim.sh`, which runs `uv run mjpython -m robotarm sim` and sets up `DYLD_LIBRARY_PATH` on macOS; `mjpython` is required for the viewer). |
 | `make teleop` | Launches the PlayStation teleop master against the TCP sim/robot bus. |
 
 Other useful commands:
+
+- `uv run robotarm sim --no-viewer` — the headless equivalent of `make sim`, works under plain `python`/`uv run` on any platform; see `docs/simulator.md`.
+- `uv run robotarm monitor --bus <URL>` — print live axis state/position/faults from any bus (`tcp://…`, `sim`, or a real interface).
+- `uv run robotarm gamepad-test` — print live gamepad state until Ctrl-C, to check a controller before teleop.
+- `uv run robotarm identify --bus <URL> --node <N> [--duty D]` — open-loop step experiment over CAN for `stepfit`; see `docs/simulator.md` and `docs/bringup.md`.
+- `uv run robotarm stepfit <recording> --motor <name> --supply <V> --cpr <N> --out <config.yaml>` — fit the bench motor model to a step recording.
+- `uv run robotarm tune --axis <name> [--velocity]` — step-response metrics for one axis in the simulator, used to derive `config/arm.yaml`'s gains.
 
 - `scripts/idf.sh <idf.py args>` — run any `idf.py` subcommand (e.g. `build`, `menuconfig`, `size`) inside the official ESP-IDF v6.1 Docker image, with the repo mounted at `/project`. Requires Docker (or Colima) running, and the repo must live under `$HOME` so it can be mounted.
 - `uv run robotarm --help` — the Python CLI entry point; each later task registers its own subcommand.
