@@ -152,6 +152,10 @@ uv run robotarm stepfit output.txt --motor faulhaber_2224sr_12v --supply 12 --cp
     --plot docs/img/stepfit.png --out config/bench_identified.yaml
 ```
 
+(This regenerates the committed reference fit, so it names both outputs explicitly. Without
+`--out`/`--plot`, `stepfit` writes scratch files `stepfit_<csv name>.yaml/.png` in the current
+directory and leaves the reference alone.)
+
 | parameter | value (motor shaft) |
 |---|---|
 | `j_total` | 6.28e-7 kg m² |
@@ -195,7 +199,7 @@ the ~2 ms lag of the current reading.
 
 ### Redoing this on the robot
 
-`robotarm identify --bus <URL> --node <N> [--duty 1.0] [--out output.txt]` runs the same
+`robotarm identify --bus <URL> --node <N> [--duty 1.0] [--out identify_node<N>.csv]` runs the same
 open-loop step over CAN instead of the firmware's old hard-coded bench test: enable, duty 0
 (80 ms), `--duty` (80 ms), duty 0 (40 ms), disable, recording every STATUS+TELEMETRY pair of
 that node into a CSV with exactly `output.txt`'s columns
@@ -206,10 +210,14 @@ It refuses (exit 2) if the axis isn't DISABLED/READY (not FAULT/HOMING) or if `-
 the axis's `max_duty`.
 
 ```
-uv run robotarm identify --bus sim --node 2 --duty 0.5 --out output.txt
-uv run robotarm stepfit output.txt --motor <name> --supply <V> --cpr <4 × lines> \
-    --plot docs/img/stepfit.png --out config/bench_identified.yaml
+uv run robotarm identify --bus sim --node 2 --duty 0.5          # -> identify_node2.csv
+uv run robotarm stepfit identify_node2.csv --motor <name> --supply <V> --cpr <4 × lines>
+                                                              # -> stepfit_identify_node2.yaml/.png
 ```
+
+Both default to scratch names in the current directory (git-ignored), so trying this never
+overwrites the committed reference data (`output.txt`, `config/bench_identified.yaml`,
+`docs/img/stepfit.png`) that `make test` checks. Pass `--out`/`--plot` to write elsewhere.
 
 Once the arm is back, run this on a known axis with a known motor, encoder and supply, then
 refit `J`, `b`, `T_c` per axis and replace the `(assumed)` friction values in `config/arm.yaml`

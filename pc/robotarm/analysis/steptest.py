@@ -185,15 +185,23 @@ def _cmd_stepfit(args: argparse.Namespace) -> int:
     print(f"  tau_coulomb = {params.tau_coulomb:.4g} Nm")
     print(f"  rmse {report.rmse_counts:.2f} counts ({100 * report.rmse_counts / abs(final):.2f} % of final), "
           f"final error {report.final_error_pct:.2f} %")
-    if args.out:
-        meta = {"source": Path(args.csv).name, "motor_name": args.motor}
-        save_identified(args.out, params, report, meta)
-        print(f"wrote {args.out}")
-    if args.plot:
-        plot_fit(args.plot, data, params,
-                 f"Bench step response: {args.motor} @ {args.supply:g} V, {args.cpr:g} counts/rev")
-        print(f"wrote {args.plot}")
+    out, plot = output_paths(args)
+    meta = {"source": Path(args.csv).name, "motor_name": args.motor}
+    save_identified(out, params, report, meta)
+    print(f"wrote {out}")
+    plot_fit(plot, data, params, f"Bench step response: {args.motor} @ {args.supply:g} V, {args.cpr:g} counts/rev")
+    print(f"wrote {plot}")
     return 0
+
+
+def output_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    """--out/--plot, defaulting to scratch files stepfit_<csv stem>.yaml/.png in the current
+    directory -- never the committed reference fit (config/bench_identified.yaml,
+    docs/img/stepfit.png), which only changes when passed explicitly."""
+    stem = Path(args.csv).stem
+    out = args.out if args.out is not None else Path(f"stepfit_{stem}.yaml")
+    plot = args.plot if args.plot is not None else Path(f"stepfit_{stem}.png")
+    return out, plot
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -202,6 +210,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--cpr", type=float, default=256.0, help="encoder counts per motor revolution (x4 lines)")
     p.add_argument("--motor", default=DEFAULT_MOTOR, help="motor name from config/arm.yaml")
     p.add_argument("--supply", type=float, default=12.0, help="bridge supply voltage during the recording")
-    p.add_argument("--plot", type=Path, default=Path("docs/img/stepfit.png"))
-    p.add_argument("--out", type=Path, default=Path("config/bench_identified.yaml"))
+    p.add_argument("--plot", type=Path, default=None,
+                   help="fit plot (default: stepfit_<csv name>.png in the current directory)")
+    p.add_argument("--out", type=Path, default=None,
+                   help="identified parameters YAML (default: stepfit_<csv name>.yaml in the current directory; "
+                        "the committed reference fit is config/bench_identified.yaml)")
     p.set_defaults(func=_cmd_stepfit)

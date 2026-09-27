@@ -215,3 +215,18 @@ def test_identify_cli_ctrl_c_exits_cleanly_with_partial_csv_and_disables(tcp_sim
         if proc.poll() is None:
             proc.kill()
             proc.communicate()
+
+
+def test_identify_default_out_is_a_scratch_name_not_output_txt(tcp_sim, cfg, tmp_path, monkeypatch):
+    """The default must not overwrite the committed bench recording output.txt."""
+    from robotarm.cli import build_parser
+
+    args = build_parser().parse_args(["identify", "--bus", "sim", "--node", "2"])
+    assert args.out is None
+    monkeypatch.chdir(tmp_path)
+    axis = cfg.axis_by_name("shoulder")
+    rc = run_identify(f"tcp://127.0.0.1:{tcp_sim.port}", axis.node, duty=axis.max_duty,
+                      pre_s=0.02, on_s=0.02, post_s=0.01)
+    assert rc == 0
+    assert (tmp_path / f"identify_node{axis.node}.csv").exists()
+    assert not (tmp_path / "output.txt").exists()

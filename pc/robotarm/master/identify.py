@@ -152,7 +152,12 @@ def _wait_for_state(client: ArmClient, node: int, stop: threading.Event,
     raise TimeoutError(f"no STATUS received from node {node} within {timeout_s:g} s")
 
 
-def run_identify(bus_url: str, node: int, duty: float = 1.0, out: str | Path = "output.txt",
+def default_out_path(node: int) -> Path:
+    """identify_node<N>.csv in the current directory: never the committed bench recording output.txt."""
+    return Path(f"identify_node{node}.csv")
+
+
+def run_identify(bus_url: str, node: int, duty: float = 1.0, out: str | Path | None = None,
                   pre_s: float = 0.08, on_s: float = 0.08, post_s: float = 0.04) -> int:
     """Body of `robotarm identify`. Returns the process exit code:
 
@@ -164,7 +169,11 @@ def run_identify(bus_url: str, node: int, duty: float = 1.0, out: str | Path = "
     reported as a single `error: ...` line on stderr.
 
     On every exit path once the run has started, the axis is sent duty 0 then DISABLE
-    (best effort -- if the bus itself just died there is nothing left to send to)."""
+    (best effort -- if the bus itself just died there is nothing left to send to).
+
+    `out` defaults to default_out_path(node)."""
+    if out is None:
+        out = default_out_path(node)
     try:
         arm_cfg = load_arm_config()
     except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError) as exc:
@@ -269,8 +278,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                         help="bus URL: tcp://host:port, sim, slcan:/dev/tty..., gs_usb:0, socketcan:can0, ...")
     parser.add_argument("--node", type=int, required=True, help="axis node id (see config/arm.yaml)")
     parser.add_argument("--duty", type=float, default=1.0, help="duty applied during the step (-1..1, default 1.0)")
-    parser.add_argument("--out", type=Path, default=Path("output.txt"),
-                        help="CSV path (default: output.txt, same name as the original bench recording)")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="CSV path (default: identify_node<N>.csv in the current directory)")
     parser.add_argument("--pre", type=float, default=0.08, help="seconds at duty 0 before the step (default 0.08)")
     parser.add_argument("--on", type=float, default=0.08, help="seconds at --duty (default 0.08)")
     parser.add_argument("--post", type=float, default=0.04, help="seconds at duty 0 after the step (default 0.04)")

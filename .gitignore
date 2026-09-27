@@ -79,3 +79,8 @@ Desktop.ini
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+
+# Scratch outputs of `robotarm identify` / `robotarm stepfit` default names (the committed
+# reference data is output.txt, config/bench_identified.yaml and docs/img/stepfit.png)
+identify_*.csv
+/stepfit_*

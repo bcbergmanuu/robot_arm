@@ -93,9 +93,9 @@ make sim                                      # MuJoCo simulator with viewer, on
 scripts/sim.sh --no-viewer                    # ...or headless (any platform, no window server needed)
 make teleop                                   # PlayStation-controller master, against the simulator above
 uv run robotarm gamepad-test                  # check a paired controller before trusting it to teleop
-uv run robotarm identify --bus sim --node 2 --duty 0.5 --out output.txt   # open-loop step, sim or robot
-uv run robotarm stepfit output.txt --motor faulhaber_2224sr_12v --supply 12 --cpr 256 \
-    --out config/bench_identified.yaml        # fit the bench motor model to a step recording
+uv run robotarm identify --bus sim --node 2 --duty 0.5   # open-loop step, sim or robot -> identify_node2.csv
+uv run robotarm stepfit identify_node2.csv --motor faulhaber_2224sr_12v --supply 12 --cpr 256
+                                              # fit the bench motor model -> stepfit_identify_node2.yaml/.png
 scripts/idf.sh build                          # build the ESP32-S3 firmware in Docker (no flashing)
 ```
 
