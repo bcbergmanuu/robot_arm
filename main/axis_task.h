@@ -1,7 +1,7 @@
 #pragma once
 
-#include <stdint.h>
+#include "axis/axis_config.h"
 
-/* Starts the 1 kHz control task (gptimer-paced, core 1) and a 1 Hz status-log task.
- * The HAL modules must be initialised first. node_id must have an entry in the axis config table. */
-void axis_task_start(uint8_t node_id);
+/* Starts the 1 kHz control task (gptimer-paced, core 1, stall-guarded) and a 1 Hz status-log task.
+ * The HAL modules must be initialised first. */
+void axis_task_start(const axis_config_t *cfg);

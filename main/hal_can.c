@@ -1,5 +1,6 @@
 #include "hal_can.h"
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -10,32 +11,42 @@
 #include "esp_twai_onchip.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 
 /*
  * RX: the driver's on_rx_done callback (ISR) copies each standard data frame into a FreeRTOS queue
  * that the axis task drains without blocking.
  *
- * TX: twai_node_transmit() queues a *pointer* to the caller's twai_frame_t (and its data buffer)
- * until the frame is on the wire, so frames live in a static pool whose slots are released in
- * on_tx_done. The pool has exactly TX_DEPTH slots, so the driver queue can never be full when we
- * submit (no blocking, no driver error log). A full pool or bus-off drops the frame and counts it.
+ * TX: hal_can_send() only copies the frame into a FreeRTOS queue (non-blocking, drop + count when
+ * full). A separate tx task hands frames to the driver, so no driver call -- and no driver log --
+ * ever runs in the 1 kHz control path. (The driver logs with ESP_EARLY_LOGE, which in IDF 6.1 has no
+ * per-tag filtering, so esp_log_level_set("esp_twai", ...) would not silence it; e.g. the
+ * "node is bus off" line when bus-off races our state check below.)
+ * twai_node_transmit() queues a *pointer* to the caller's twai_frame_t (and its data buffer) until
+ * the frame is on the wire, so frames live in a static pool whose slots are released in on_tx_done.
+ * The pool has exactly TX_DEPTH slots, so the driver queue can never be full when we submit. A full
+ * pool or bus-off drops the frame and counts it.
  */
 
 #define BITRATE 1000000
 #define TX_DEPTH 16
 #define RX_DEPTH 32
+#define TX_TASK_PRIO (configMAX_PRIORITIES - 3) /* below the control task */
+#define TX_TASK_CORE 0                          /* keep it off the control task's core */
 
 static twai_node_handle_t s_node;
-static QueueHandle_t s_rxq;
+static QueueHandle_t s_rxq, s_txq;
 
 static twai_frame_t s_tx_frames[TX_DEPTH];
 static uint8_t s_tx_data[TX_DEPTH][TWAI_FRAME_MAX_LEN];
 static uint32_t s_tx_free = (1u << TX_DEPTH) - 1u; /* bit i set = slot i free */
 static portMUX_TYPE s_tx_mux = portMUX_INITIALIZER_UNLOCKED;
 
+static void tx_task(void *arg);
+
 static volatile uint8_t s_state = TWAI_ERROR_ACTIVE;
 static volatile bool s_recovering;
-static volatile uint32_t s_rx_dropped, s_tx_dropped, s_tx_failed;
+static atomic_uint s_rx_dropped, s_tx_dropped, s_tx_failed; /* written from ISR and two tasks */
 
 static bool IRAM_ATTR on_rx_done(twai_node_handle_t node, const twai_rx_done_event_data_t *edata, void *user_ctx)
 {
@@ -53,7 +64,7 @@ static bool IRAM_ATTR on_rx_done(twai_node_handle_t node, const twai_rx_done_eve
     memcpy(f.data, data, f.len);
     BaseType_t woken = pdFALSE;
     if (xQueueSendFromISR(s_rxq, &f, &woken) != pdTRUE) {
-        s_rx_dropped++;
+        atomic_fetch_add(&s_rx_dropped, 1);
     }
     return woken == pdTRUE;
 }
@@ -70,7 +81,7 @@ static bool IRAM_ATTR on_tx_done(twai_node_handle_t node, const twai_tx_done_eve
     (void)node;
     (void)user_ctx;
     if (!edata->is_tx_success) {
-        s_tx_failed++;
+        atomic_fetch_add(&s_tx_failed, 1);
     }
     ptrdiff_t idx = edata->done_tx_frame - s_tx_frames;
     if (idx >= 0 && idx < TX_DEPTH) {
@@ -93,7 +104,8 @@ static bool IRAM_ATTR on_state_change(twai_node_handle_t node, const twai_state_
 void hal_can_init(void)
 {
     s_rxq = xQueueCreate(RX_DEPTH, sizeof(can_frame_t));
-    ESP_ERROR_CHECK(s_rxq ? ESP_OK : ESP_ERR_NO_MEM);
+    s_txq = xQueueCreate(TX_DEPTH, sizeof(can_frame_t));
+    ESP_ERROR_CHECK(s_rxq && s_txq ? ESP_OK : ESP_ERR_NO_MEM);
 
     twai_onchip_node_config_t cfg = {
         .io_cfg = {
@@ -119,6 +131,9 @@ void hal_can_init(void)
     };
     ESP_ERROR_CHECK(twai_node_register_event_callbacks(s_node, &cbs, NULL));
     ESP_ERROR_CHECK(twai_node_enable(s_node));
+
+    BaseType_t ok = xTaskCreatePinnedToCore(tx_task, "can_tx", 3072, NULL, TX_TASK_PRIO, NULL, TX_TASK_CORE);
+    ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }
 
 bool hal_can_recv(can_frame_t *f)
@@ -128,8 +143,17 @@ bool hal_can_recv(can_frame_t *f)
 
 bool hal_can_send(const can_frame_t *f)
 {
+    if (xQueueSend(s_txq, f, 0) != pdTRUE) {
+        atomic_fetch_add(&s_tx_dropped, 1);
+        return false;
+    }
+    return true;
+}
+
+/* Hands one frame to the driver; false when it had to be dropped. */
+static bool submit(const can_frame_t *f)
+{
     if (s_state == TWAI_ERROR_BUS_OFF) { /* the driver would reject (and log) it */
-        s_tx_dropped++;
         return false;
     }
     portENTER_CRITICAL(&s_tx_mux);
@@ -140,7 +164,6 @@ bool hal_can_send(const can_frame_t *f)
     }
     portEXIT_CRITICAL(&s_tx_mux);
     if (idx == TX_DEPTH) {
-        s_tx_dropped++;
         return false;
     }
 
@@ -153,17 +176,31 @@ bool hal_can_send(const can_frame_t *f)
     };
     if (twai_node_transmit(s_node, &s_tx_frames[idx], 0) != ESP_OK) {
         release_slot(idx);
-        s_tx_dropped++;
         return false;
     }
     return true;
 }
 
+static void tx_task(void *arg)
+{
+    (void)arg;
+    can_frame_t f;
+    for (;;) {
+        if (xQueueReceive(s_txq, &f, portMAX_DELAY) == pdTRUE && !submit(&f)) {
+            atomic_fetch_add(&s_tx_dropped, 1);
+        }
+    }
+}
+
 void hal_can_service(void)
 {
     if (s_state == TWAI_ERROR_BUS_OFF && !s_recovering) {
+        /* Set before the call so on_state_change (leaving bus-off) cannot be overtaken by our store;
+         * on failure stay un-set so the next service call retries. */
         s_recovering = true;
-        twai_node_recover(s_node);
+        if (twai_node_recover(s_node) != ESP_OK) {
+            s_recovering = false;
+        }
     }
 }
 
@@ -177,8 +214,8 @@ void hal_can_get_stats(hal_can_stats_t *out)
         .tec = status.tx_error_count,
         .rec = status.rx_error_count,
         .bus_errors = record.bus_err_num,
-        .rx_dropped = s_rx_dropped,
-        .tx_dropped = s_tx_dropped,
-        .tx_failed = s_tx_failed,
+        .rx_dropped = atomic_load(&s_rx_dropped),
+        .tx_dropped = atomic_load(&s_tx_dropped),
+        .tx_failed = atomic_load(&s_tx_failed),
     };
 }

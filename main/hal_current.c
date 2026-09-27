@@ -16,7 +16,8 @@
  * callback fires at 1 kHz and only notifies current_task. The task averages the raw samples of the
  * newest frame, converts that average to mV with the curve-fitting calibration (one conversion per
  * frame, not per sample) and to mA via BOARD_CURRENT_MV_PER_A, and publishes it in a 32-bit float
- * (aligned word stores/loads are atomic on Xtensa, so readers never see a torn value).
+ * (aligned word stores/loads are atomic on Xtensa, so readers never see a torn value), then bumps a
+ * sequence number so consumers can detect a stalled pipeline.
  */
 
 #define SAMPLE_FREQ_HZ 20000
@@ -29,6 +30,7 @@ static adc_continuous_handle_t s_adc;
 static adc_cali_handle_t s_cali;
 static TaskHandle_t s_task;
 static volatile float s_current_ma;
+static volatile uint32_t s_seq; /* bumped after every published value (single writer: current_task) */
 
 static bool IRAM_ATTR on_conv_done(adc_continuous_handle_t handle, const adc_continuous_evt_data_t *edata, void *user_data)
 {
@@ -76,6 +78,7 @@ static void current_task(void *arg)
         int mv = 0;
         if (raw >= 0 && adc_cali_raw_to_voltage(s_cali, raw, &mv) == ESP_OK) {
             s_current_ma = (float)mv * (1000.0f / BOARD_CURRENT_MV_PER_A);
+            s_seq = s_seq + 1;
         }
     }
 }
@@ -122,4 +125,9 @@ void hal_current_init(void)
 float hal_current_ma(void)
 {
     return s_current_ma;
+}
+
+uint32_t hal_current_seq(void)
+{
+    return s_seq;
 }

@@ -1,9 +1,11 @@
 #include "hal_motor.h"
 
 #include <math.h>
+#include <stdatomic.h>
 
 #include "board.h"
 #include "driver/mcpwm_prelude.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 
 /*
@@ -14,11 +16,20 @@
  * same for speed 0), so duty 0 drives PWM1 = PWM2 = low: the TB9051 brake state.
  * Positive duty modulates BOARD_PWM_A_GPIO, as bdc_motor_forward() did in the old firmware.
  * Compare values are shadowed and latched at timer-zero, so both sides switch in the same PWM period.
+ *
+ * Trip (independent stall watchdog, see axis_task.c): hal_motor_trip_from_isr() sets a latch and writes
+ * compare 0 to both sides, so both inputs go low (brake) at the next timer-zero, <= 40 us later.
+ * mcpwm_comparator_set_compare_value() is the ISR-safe path: it only uses the *_ISR check macros and
+ * CONFIG_MCPWM_CTRL_FUNC_IN_IRAM places it in IRAM. mcpwm_generator_set_force_level() is not used
+ * because IDF 6.1 neither documents it as ISR-safe nor places it in IRAM (it checks with the
+ * non-ISR ESP_RETURN_ON_FALSE). The latch holds until reboot: after a stall the control task's
+ * timing can no longer be trusted, so a power cycle / reset is the explicit recovery.
  */
 
 #define PERIOD_TICKS (BOARD_PWM_RES_HZ / BOARD_PWM_FREQ_HZ) /* 400 ticks at 25 kHz / 10 MHz */
 
 static mcpwm_cmpr_handle_t s_cmp_a, s_cmp_b;
+static atomic_bool s_tripped;
 
 static void setup_generator(mcpwm_oper_handle_t oper, mcpwm_cmpr_handle_t cmp, int gpio)
 {
@@ -63,7 +74,7 @@ void hal_motor_init(void)
 
 void hal_motor_set_duty(float duty)
 {
-    if (!isfinite(duty)) {
+    if (!isfinite(duty) || atomic_load(&s_tripped)) {
         duty = 0.0f;
     }
     float mag = fminf(fabsf(duty), 1.0f);
@@ -71,4 +82,21 @@ void hal_motor_set_duty(float duty)
     /* Both arguments are always valid (ticks <= period), so the return values carry no information. */
     mcpwm_comparator_set_compare_value(s_cmp_a, duty > 0.0f ? ticks : 0);
     mcpwm_comparator_set_compare_value(s_cmp_b, duty < 0.0f ? ticks : 0);
+    /* A trip from the ISR (other core) may have landed between the check above and these writes. */
+    if (atomic_load(&s_tripped)) {
+        mcpwm_comparator_set_compare_value(s_cmp_a, 0);
+        mcpwm_comparator_set_compare_value(s_cmp_b, 0);
+    }
+}
+
+void IRAM_ATTR hal_motor_trip_from_isr(void)
+{
+    atomic_store(&s_tripped, true);
+    mcpwm_comparator_set_compare_value(s_cmp_a, 0);
+    mcpwm_comparator_set_compare_value(s_cmp_b, 0);
+}
+
+bool IRAM_ATTR hal_motor_tripped(void) /* also called from the gptimer ISR */
+{
+    return atomic_load(&s_tripped);
 }
