@@ -24,7 +24,7 @@
 
 #define EXAMPLE_ADC_BIT_WIDTH               SOC_ADC_DIGI_MAX_BITWIDTH
 
-#define EXAMPLE_READ_LEN                    40
+#define EXAMPLE_READ_LEN                    4 //4 byte sample size
 
 
 static adc_channel_t channel[1] = {ADC_CHANNEL_3};
@@ -53,7 +53,7 @@ static void continuous_adc_init(adc_channel_t *channel, uint8_t channel_num, adc
     ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &handle));
 
     adc_continuous_config_t dig_cfg = {
-        .sample_freq_hz = 50000,
+        .sample_freq_hz = 1600,
         .conv_mode = EXAMPLE_ADC_CONV_MODE,
     };
 

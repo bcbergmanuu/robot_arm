@@ -14,7 +14,7 @@
 #include "esp_adc/adc_continuous.h"
 
 #define BDC_MCPWM_TIMER_RESOLUTION_HZ 10000000 // 10MHz, 1 tick = 0.1us
-#define BDC_MCPWM_FREQ_HZ             25000    // 25KHz PWM
+#define BDC_MCPWM_FREQ_HZ             16000
 #define BDC_MCPWM_DUTY_TICK_MAX       (BDC_MCPWM_TIMER_RESOLUTION_HZ / BDC_MCPWM_FREQ_HZ) // maximum value we can set for the duty cycle, in ticks
 #define BDC_MCPWM_GPIO_A              7
 #define BDC_MCPWM_GPIO_B              8
@@ -174,7 +174,7 @@ bool motor_measure(motor_control_context_t *ctx) {
             ctx->pwm_speedvalue = 0;
             break;
         case 400:
-            ctx->pwm_speedvalue = 400;
+            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX;
             break;
         case 800:
             ctx->pwm_speedvalue = 0;
@@ -184,7 +184,7 @@ bool motor_measure(motor_control_context_t *ctx) {
     }    
          
     if(datapos < storage_space) {
-        time_array[datapos] = 200*datapos;
+        time_array[datapos] = datapos;
         torque_array[datapos] = ctx->torque_measured;
         target_pwm_array[datapos] = ctx->pwm_speedvalue;
         velocity_array[datapos] = -ctx->velocity_measured;
