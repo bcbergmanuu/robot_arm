@@ -4,6 +4,11 @@
 #include <stdio.h>
 #include <stddef.h>
 
+
+#define I2C_MASTER_SCL_IO GPIO_NUM_6
+#define I2C_MASTER_SDA_IO GPIO_NUM_5
+#define I2C_PORT 0
+
 /*=========================================================================
     I2C ADDRESS/BITS
     -----------------------------------------------------------------------*/
@@ -119,6 +124,6 @@ typedef enum {
 
 
 int read_adc(uint16_t *result);
-int init_adc();
+void run_sarADC(void *args);
 
 #endif

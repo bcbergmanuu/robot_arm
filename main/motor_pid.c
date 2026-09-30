@@ -200,7 +200,7 @@ void print_stepresponse() {
     }
 }
 
-void init_motor(void *arg) {
+void motor_pid_control(void *arg) {
     static motor_control_context_t motor_ctrl_ctx = {
         .pcnt_encoder = NULL,               
         .position_measured = 0,

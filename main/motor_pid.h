@@ -5,7 +5,7 @@
 #include "driver/pulse_cnt.h"
 #include "pid_ctrl.h"
 
-void init_motor(void *arg);
+void motor_pid_control(void *arg);
 int update_pid_params();
 
 enum pid_controls {    

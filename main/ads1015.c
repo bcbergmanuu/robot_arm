@@ -1,12 +1,12 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
-#include "ads1015.h"
+#include "freertos/task.h"
 #include "driver/i2c_master.h"
+#include "esp_log.h"
+#include "driver/gpio.h"   
+#include "ads1015.h"
 
-#define I2C_MASTER_SCL_IO GPIO_NUM_6
-#define I2C_MASTER_SDA_IO GPIO_NUM_5
-#define I2C_PORT 0
-
+static const char *TAG = "sigmaDeltaADC";
 
 i2c_master_bus_config_t i2c_mst_config = {
     .clk_source = I2C_CLK_SRC_DEFAULT,
@@ -73,7 +73,7 @@ int config_adc() {
       ADS1X15_REG_CONFIG_CPOL_ACTVLOW |
       ADS1X15_REG_CONFIG_CMODE_TRAD |  
       ADS1X15_REG_CONFIG_PGA_0_256V |
-      RATE_ADS1015_3300SPS |
+      RATE_ADS1015_920SPS |
       ADS1X15_REG_CONFIG_MUX_SINGLE_0 |
       ADS1X15_REG_CONFIG_MODE_CONTIN |
       ADS1X15_REG_CONFIG_OS_SINGLE;
@@ -87,16 +87,82 @@ int config_adc() {
   // Write config register to the ADC
   ret |= write_register(ADS1X15_REG_POINTER_CONFIG, config);
   
-
-
   return ret;
 }
 
-int init_adc() {
-  int ret = 0;
-  ret = init_i2c();  
-  ret = config_adc();
-  
+static TaskHandle_t xTaskToNotify = NULL;
+const UBaseType_t xArrayIndex = 0;
 
-  return ret;
+static void adcpin_isr(void *arg) {     
+    
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;          
+    configASSERT( xTaskToNotify != NULL );
+    vTaskNotifyGiveIndexedFromISR( xTaskToNotify,
+                        xArrayIndex,
+                        &xHigherPriorityTaskWoken );           
+}
+
+int set_RDY_interrupt() {
+    configASSERT( xTaskToNotify == NULL );
+    xTaskToNotify = xTaskGetCurrentTaskHandle();
+
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_NEGEDGE, 
+        .mode = GPIO_MODE_INPUT,        
+        .pin_bit_mask = (1ULL << GPIO_NUM_3),
+    };
+    int ret = 0;
+    ret |= gpio_config(&io_conf);
+    ret |= gpio_install_isr_service(0);
+    ret |= gpio_isr_handler_add(GPIO_NUM_3, adcpin_isr, NULL);
+    return ret;
+}
+
+typedef struct {
+    uint64_t timestamp;
+    uint16_t readvalue;
+} sigmaDeltaAdcEntry;
+
+#define bufferlength 2000
+
+sigmaDeltaAdcEntry adcbuffer[bufferlength];
+
+void run_sarADC(void *args) {
+    int ret = 0, printcounter=0, buffer_pos = 0;
+    ret = init_i2c();  
+    ret = set_RDY_interrupt();
+    ret = config_adc();  
+
+    if(ret != ESP_OK) {
+        ESP_LOGE(TAG,"Error initializing, %d", ret);
+        vTaskDelay(portMAX_DELAY);
+    }
+    
+    
+    float volt = 0, amp = 0, ampPower;
+
+    while (true)
+    {
+        uint32_t ulNotificationValue = ulTaskNotifyTakeIndexed( xArrayIndex,
+                                                   pdTRUE,
+                                                   pdMS_TO_TICKS(1000) );
+        ret |= read_adc(&(adcbuffer[buffer_pos].readvalue));
+        //adcbuffer->timestamp  //TODO
+        if(ret != ESP_OK) {
+            ESP_LOGE(TAG, "Error reading %d", ret);
+        }        
+        if(ulNotificationValue < 1) {
+            ESP_LOGE(TAG, "conversion task timeout %d", ulNotificationValue);
+        }
+        
+        if(printcounter++ > 500) {                  
+            volt = adcbuffer[buffer_pos].readvalue * 125e-7; //.256mv pp
+            amp = volt * 220; //amp = volt * 220r
+            ampPower = amp / 2.2; // tb9051
+            ESP_LOGI(TAG, "adcval = %u, volt: %f, ampPower %f \n", adcbuffer[buffer_pos].readvalue, volt, ampPower);                        
+            printcounter = 0;
+        }
+        buffer_pos++;
+    }    
+
 }

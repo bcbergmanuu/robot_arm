@@ -22,7 +22,7 @@ controls motor_c;
 
 
 
-void start_motor(void *arg) {
+void motor_position_loop(void *arg) {
 
     while(1) {
         
