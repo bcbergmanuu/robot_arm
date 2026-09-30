@@ -75,7 +75,7 @@ static void continuous_adc_init(adc_channel_t *channel, uint8_t channel_num, adc
     *out_handle = handle;
 }
 
-void adc_run(void *arg) {
+void continuous_adc_run(void *arg) {
         
     
     esp_err_t ret;
