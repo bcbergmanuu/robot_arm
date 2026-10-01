@@ -3,6 +3,7 @@
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"   
 #include "ads1015.h"
 
@@ -147,7 +148,7 @@ void run_sarADC(void *args) {
                                                    pdTRUE,
                                                    pdMS_TO_TICKS(1000) );
         ret |= read_adc(&(adcbuffer[buffer_pos].readvalue));
-        //adcbuffer->timestamp  //TODO
+        adcbuffer->timestamp = esp_timer_get_time();
         if(ret != ESP_OK) {
             ESP_LOGE(TAG, "Error reading %d", ret);
         }        
@@ -155,13 +156,13 @@ void run_sarADC(void *args) {
             ESP_LOGE(TAG, "conversion task timeout %d", ulNotificationValue);
         }
         
-        if(printcounter++ > 500) {                  
-            volt = adcbuffer[buffer_pos].readvalue * 125e-7; //.256mv pp
-            amp = volt * 220; //amp = volt * 220r
-            ampPower = amp / 2.2; // tb9051
-            ESP_LOGI(TAG, "adcval = %u, volt: %f, ampPower %f \n", adcbuffer[buffer_pos].readvalue, volt, ampPower);                        
-            printcounter = 0;
-        }
+        // if(printcounter++ > 500 && false) {                  
+        //     volt = adcbuffer[buffer_pos].readvalue * 125e-7; //.256mv pp
+        //     amp = volt * 220; //amp = volt * 220r
+        //     ampPower = amp / 2.2; // tb9051
+        //     ESP_LOGI(TAG, "adcval = %u, volt: %f, ampPower %f \n", adcbuffer[buffer_pos].readvalue, volt, ampPower);                        
+        //     printcounter = 0;
+        // }
         buffer_pos++;
     }    
 
