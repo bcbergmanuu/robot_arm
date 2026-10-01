@@ -4,6 +4,14 @@
 #include <stdio.h>
 #include <stddef.h>
 
+typedef struct {
+    uint64_t timestamp;
+    uint16_t readvalue;
+} sigmaDeltaAdcEntry;
+
+#define ads1015_bufferlength 4096
+
+extern sigmaDeltaAdcEntry adcbuffer[ads1015_bufferlength];
 
 #define I2C_MASTER_SCL_IO GPIO_NUM_6
 #define I2C_MASTER_SDA_IO GPIO_NUM_5
@@ -124,6 +132,6 @@ typedef enum {
 
 
 int read_adc(uint16_t *result);
-void run_sarADC(void *args);
+void run_ads1015adc(void *args);
 
 #endif

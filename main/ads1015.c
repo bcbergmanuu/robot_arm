@@ -73,8 +73,8 @@ int config_adc() {
       ADS1X15_REG_CONFIG_CLAT_LATCH |      
       ADS1X15_REG_CONFIG_CPOL_ACTVLOW |
       ADS1X15_REG_CONFIG_CMODE_TRAD |  
-      ADS1X15_REG_CONFIG_PGA_0_256V |
-      RATE_ADS1015_920SPS |
+      ADS1X15_REG_CONFIG_PGA_2_048V |
+      RATE_ADS1015_1600SPS |
       ADS1X15_REG_CONFIG_MUX_SINGLE_0 |
       ADS1X15_REG_CONFIG_MODE_CONTIN |
       ADS1X15_REG_CONFIG_OS_SINGLE;
@@ -119,16 +119,9 @@ int set_RDY_interrupt() {
     return ret;
 }
 
-typedef struct {
-    uint64_t timestamp;
-    uint16_t readvalue;
-} sigmaDeltaAdcEntry;
+sigmaDeltaAdcEntry adcbuffer[ads1015_bufferlength];
 
-#define bufferlength 2000
-
-sigmaDeltaAdcEntry adcbuffer[bufferlength];
-
-void run_sarADC(void *args) {
+void run_ads1015adc(void *args) {
     int ret = 0, printcounter=0, buffer_pos = 0;
     ret = init_i2c();  
     ret = set_RDY_interrupt();
@@ -146,9 +139,10 @@ void run_sarADC(void *args) {
     {
         uint32_t ulNotificationValue = ulTaskNotifyTakeIndexed( xArrayIndex,
                                                    pdTRUE,
-                                                   pdMS_TO_TICKS(1000) );
+                                                   pdMS_TO_TICKS(1000) );        
+
         ret |= read_adc(&(adcbuffer[buffer_pos].readvalue));
-        adcbuffer->timestamp = esp_timer_get_time();
+        adcbuffer[buffer_pos].timestamp = esp_timer_get_time();
         if(ret != ESP_OK) {
             ESP_LOGE(TAG, "Error reading %d", ret);
         }        
@@ -164,6 +158,10 @@ void run_sarADC(void *args) {
         //     printcounter = 0;
         // }
         buffer_pos++;
+        if(buffer_pos > 4000) {
+            ESP_LOGI(TAG, "finished");
+            vTaskDelay(portMAX_DELAY);
+        }
     }    
 
 }

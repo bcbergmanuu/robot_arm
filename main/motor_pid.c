@@ -7,7 +7,7 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-
+#include "ads1015.h"
 
 #include "motor_pid.h"
 
@@ -52,11 +52,20 @@ static const char *TAG = "motor_pid";
 //     }
 // }
 
-
+uint64_t start_time = 0;
 
 void printer(motor_control_context_t *ctx) {
-    ESP_LOGI(TAG, "pos_meas: %-4d vel_meas: %-4d vel_tar: %-4.2f pos_tar: %-4.2f pwm_speed: %-4.2f, torque_tar: %-4.2f, torque_meas: %-8.2f", 
-        ctx->position_measured, ctx->velocity_measured, ctx->velocity_target, ctx->position_target, ctx->pwm_speedvalue, ctx->target_torque, ctx->torque_measured);
+    
+
+    ESP_LOGI(TAG, "%10s | %-4d | %10s | %-4d | %10s | %-4.2f | %10s | %-4.2f | %10s | %-4.2f | %10s | %-4.2f | %10s: %-4.2f", 
+        "pos_meas: ", ctx->position_measured,
+        "vel_meas: ", ctx->velocity_measured,
+        "vel_tar: ", ctx->velocity_target,
+        "pos_tar:",  ctx->position_target,
+        "pwm_speed: ", ctx->pwm_speedvalue,
+        "torq_tar",  ctx->target_torque,
+        "torq_sar:", ctx->torque_measured
+         );
 }
 
 
@@ -195,8 +204,17 @@ bool motor_measure(motor_control_context_t *ctx) {
 }
 
 void print_stepresponse() {
+    //search for first entry after starting time in sigma_delta table
+    int startpoint = 0;
+    for(int x =0; x < ads1015_bufferlength; x++) {
+        if(adcbuffer[x].timestamp >= start_time) {
+            startpoint = x-1; //take previous...
+            ESP_LOGI(TAG, "ads1015 entry %d %"PRIu64, x, adcbuffer[x-1].timestamp);
+            break;
+        }
+    }
     for(int x =0; x< storage_space; x++) {
-        printf("%d,%d,%d,%d,%f\n", time_array[x], position_array[x], velocity_array[x], target_pwm_array[x], torque_array[x]);
+        printf("%d,%d,%d,%d,%-4.1f,%d\n", time_array[x], position_array[x], velocity_array[x], target_pwm_array[x], torque_array[x], adcbuffer[x+startpoint].readvalue);
     }
 }
 
@@ -316,10 +334,18 @@ void motor_pid_control(void *arg) {
         //     update_pid_params();   
         // }
     //}
+
+    
     int cur_pulse_cntr = 0, torque_loop_cntr =0, outer_loop_cnt = 0, display_cnt = 0;                        
 
     while(1){
         ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);   
+        //first time? 
+        if(start_time == 0) {
+            start_time = esp_timer_get_time();
+            ESP_LOGI(TAG, "starttime %"PRIu64, start_time);
+        }
+
         if(!motor_measure(&motor_ctrl_ctx)) break;
         motor_ctrl_ctx.position_target = motion_paramters.position;
         setMotorVelocity(motion_paramters.velocity);

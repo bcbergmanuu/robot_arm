@@ -13,19 +13,10 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_adc/adc_continuous.h"
-#include "main.h"
+#include "task_handles.h"
 #include "motor_pid.h"
 
-#define EXAMPLE_ADC_UNIT                    ADC_UNIT_1
-#define EXAMPLE_ADC_CONV_MODE               ADC_CONV_SINGLE_UNIT_1
-
-
-#define EXAMPLE_ADC_ATTEN                   ADC_ATTEN_DB_0
-
-#define EXAMPLE_ADC_BIT_WIDTH               SOC_ADC_DIGI_MAX_BITWIDTH
-
-#define EXAMPLE_READ_LEN                    4 //4 byte sample size
-
+#define sample_read_len 1*SOC_ADC_DIGI_DATA_BYTES_PER_CONV //in bytes, 4 bytes per sample
 
 static adc_channel_t channel[1] = {ADC_CHANNEL_3};
 
@@ -48,22 +39,22 @@ static void continuous_adc_init(adc_channel_t *channel, uint8_t channel_num, adc
 
     adc_continuous_handle_cfg_t adc_config = {
         .max_store_buf_size = 1024,
-        .conv_frame_size = EXAMPLE_READ_LEN,
+        .conv_frame_size = sample_read_len, 
     };
     ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &handle));
 
     adc_continuous_config_t dig_cfg = {
         .sample_freq_hz = 1600,
-        .conv_mode = EXAMPLE_ADC_CONV_MODE,
+        .conv_mode = ADC_CONV_SINGLE_UNIT_1,
     };
 
     adc_digi_pattern_config_t adc_pattern[SOC_ADC_PATT_LEN_MAX] = {0};
     dig_cfg.pattern_num = channel_num;
     for (int i = 0; i < channel_num; i++) {
-        adc_pattern[i].atten = EXAMPLE_ADC_ATTEN;
+        adc_pattern[i].atten = ADC_ATTEN_DB_0;
         adc_pattern[i].channel = channel[i] & 0x7;
-        adc_pattern[i].unit = EXAMPLE_ADC_UNIT;
-        adc_pattern[i].bit_width = EXAMPLE_ADC_BIT_WIDTH;
+        adc_pattern[i].unit = ADC_UNIT_1;
+        adc_pattern[i].bit_width = SOC_ADC_DIGI_MAX_BITWIDTH;
 
         ESP_LOGI(TAG, "adc_pattern[%d].atten is :%"PRIx8, i, adc_pattern[i].atten);
         ESP_LOGI(TAG, "adc_pattern[%d].channel is :%"PRIx8, i, adc_pattern[i].channel);
@@ -80,8 +71,8 @@ void continuous_adc_run(void *arg) {
     
     esp_err_t ret;
     uint32_t ret_num = 0;
-    uint8_t result[EXAMPLE_READ_LEN] = {0};
-    memset(result, 0xcc, EXAMPLE_READ_LEN);
+    uint8_t result[sample_read_len] = {0};
+    memset(result, 0xcc, sample_read_len);
 
     s_task_handle = xTaskGetCurrentTaskHandle();
 
@@ -107,7 +98,7 @@ void continuous_adc_run(void *arg) {
         ulTaskNotifyTakeIndexed(0, pdTRUE, portMAX_DELAY);
 
         
-        ret = adc_continuous_read(handle, result, EXAMPLE_READ_LEN, &ret_num, 0);
+        ret = adc_continuous_read(handle, result, sample_read_len, &ret_num, 0);
         
         
             if (ret == ESP_OK) {
@@ -138,7 +129,7 @@ void continuous_adc_run(void *arg) {
                         }
                     }
                     if(mean_count > 0) {
-                        mean = mean/mean_count;
+                        mean = mean/(float)mean_count;
                         updateAdcValue(mean);
                         xTaskNotifyGiveIndexed( taskHandle_pid, 1 );
                     }
