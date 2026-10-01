@@ -9,7 +9,7 @@ typedef struct {
     uint16_t readvalue;
 } sigmaDeltaAdcEntry;
 
-#define ads1015_bufferlength 4096
+#define ads1015_bufferlength 8192
 
 extern sigmaDeltaAdcEntry adcbuffer[ads1015_bufferlength];
 
