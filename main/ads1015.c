@@ -6,6 +6,7 @@
 #include "esp_timer.h"
 #include "driver/gpio.h"   
 #include "ads1015.h"
+#include "motor_pid.h"
 
 static const char *TAG = "sigmaDeltaADC";
 
@@ -70,11 +71,11 @@ int config_adc() {
   int ret = 0;
   uint16_t config =
       ADS1X15_REG_CONFIG_CQUE_1CONV |                                    
-      ADS1X15_REG_CONFIG_CLAT_LATCH |      
+      ADS1X15_REG_CONFIG_CLAT_NONLAT |      
       ADS1X15_REG_CONFIG_CPOL_ACTVLOW |
       ADS1X15_REG_CONFIG_CMODE_TRAD |  
       ADS1X15_REG_CONFIG_PGA_4_096V |
-      RATE_ADS1015_1600SPS |
+      RATE_ADS1015_3300SPS |
       ADS1X15_REG_CONFIG_MUX_SINGLE_0 |
       ADS1X15_REG_CONFIG_MODE_CONTIN |
       ADS1X15_REG_CONFIG_OS_SINGLE;
@@ -100,7 +101,11 @@ static void adcpin_isr(void *arg) {
     configASSERT( xTaskToNotify != NULL );
     vTaskNotifyGiveIndexedFromISR( xTaskToNotify,
                         xArrayIndex,
-                        &xHigherPriorityTaskWoken );           
+                        &xHigherPriorityTaskWoken );   
+    
+    if (xHigherPriorityTaskWoken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }        
 }
 
 int set_RDY_interrupt() {
@@ -119,8 +124,6 @@ int set_RDY_interrupt() {
     return ret;
 }
 
-sigmaDeltaAdcEntry adcbuffer[ads1015_bufferlength];
-
 void run_ads1015adc(void *args) {
     int ret = 0, printcounter=0, buffer_pos = 0;
     ret = init_i2c();  
@@ -134,15 +137,19 @@ void run_ads1015adc(void *args) {
     
     
     float volt = 0, amp = 0, ampPower;
+    uint16_t adc_value;
 
     while (true)
     {
         uint32_t ulNotificationValue = ulTaskNotifyTakeIndexed( xArrayIndex,
-                                                   pdTRUE,
-                                                   pdMS_TO_TICKS(1000) );        
+                                                   false,
+                                                   portMAX_DELAY );        
 
-        ret |= read_adc(&(adcbuffer[buffer_pos].readvalue));
-        adcbuffer[buffer_pos].timestamp = esp_timer_get_time();
+        ret |= read_adc(&adc_value);
+
+        executePid(adc_value);
+        
+        
         if(ret != ESP_OK) {
             ESP_LOGE(TAG, "Error reading %d", ret);
         }        
@@ -157,11 +164,7 @@ void run_ads1015adc(void *args) {
         //     ESP_LOGI(TAG, "adcval = %u, volt: %f, ampPower %f \n", adcbuffer[buffer_pos].readvalue, volt, ampPower);                        
         //     printcounter = 0;
         // }
-        buffer_pos++;
-        if(buffer_pos > 4000) {
-            ESP_LOGI(TAG, "finished");
-            vTaskDelay(portMAX_DELAY);
-        }
+        
     }    
 
 }
