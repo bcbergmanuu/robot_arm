@@ -166,7 +166,7 @@ void updateAdcValue(float value) {
     last_adc = value;
 }
 
-#define storage_space 1000
+#define storage_space 700
 static float torque_array[storage_space] = {0};
 static int target_pwm_array[storage_space] = {0};
 static int time_array[storage_space] = {0};
@@ -182,10 +182,10 @@ bool motor_measure(motor_control_context_t *ctx) {
         case 0:
             ctx->pwm_speedvalue = 0;
             break;
-        case 400:
-            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX;
+        case 100:
+            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX*.7;
             break;
-        case 800:
+        case 600:
             ctx->pwm_speedvalue = 0;
             break;              
         default:
@@ -371,13 +371,14 @@ void motor_pid_control(void *arg) {
                // pid_compute(motor_ctrl_ctx.pid_controls[pid_position], -((float)motor_ctrl_ctx.position_measured) + motor_ctrl_ctx.position_target, &motor_ctrl_ctx.velocity_target);                        
             }
         }
+        
+        // if(motor_ctrl_ctx.target_torque > 0) {
+        //     bdc_motor_forward(motor);                
+        // } else {
+        //     bdc_motor_reverse(motor);
+        // }
 
-        if(motor_ctrl_ctx.target_torque > 0) {
-            bdc_motor_forward(motor);                
-        } else {
-            bdc_motor_reverse(motor);
-        }
-
+        bdc_motor_reverse(motor); //motor measure
         bdc_motor_set_speed(motor, (uint32_t)abs((int)motor_ctrl_ctx.pwm_speedvalue));                
             
         // if(display_cnt++ > 1000) {

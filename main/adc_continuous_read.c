@@ -16,7 +16,7 @@
 #include "task_handles.h"
 #include "motor_pid.h"
 
-#define sample_read_len 2*SOC_ADC_DIGI_DATA_BYTES_PER_CONV //in bytes, 4 bytes per sample
+#define sample_read_len 20*SOC_ADC_DIGI_DATA_BYTES_PER_CONV //in bytes, 4 bytes per sample
 
 static adc_channel_t channel[1] = {ADC_CHANNEL_3};
 
@@ -44,7 +44,7 @@ static void continuous_adc_init(adc_channel_t *channel, uint8_t channel_num, adc
     ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &handle));
 
     adc_continuous_config_t dig_cfg = {
-        .sample_freq_hz = 3200,
+        .sample_freq_hz = 32000,
         .conv_mode = ADC_CONV_SINGLE_UNIT_1,
     };
 

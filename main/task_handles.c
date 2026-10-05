@@ -48,13 +48,13 @@ void createSystemTasks() {
       ) !=pdPASS);
 
 
-      ESP_ERROR_CHECK(xTaskCreate(
-            motor_position_loop,
-            "motorPosition",
-            4096,
-            NULL,
-            10,
-            NULL
-      ) != pdPASS);
+      // ESP_ERROR_CHECK(xTaskCreate(
+      //       motor_position_loop,
+      //       "motorPosition",
+      //       4096,
+      //       NULL,
+      //       10,
+      //       NULL
+      // ) != pdPASS);
  
 }

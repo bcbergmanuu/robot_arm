@@ -139,7 +139,7 @@ void run_ads1015adc(void *args) {
     {
         uint32_t ulNotificationValue = ulTaskNotifyTakeIndexed( xArrayIndex,
                                                    pdTRUE,
-                                                   pdMS_TO_TICKS(1000) );        
+                                                   portMAX_DELAY );        
 
         ret |= read_adc(&(adcbuffer[buffer_pos].readvalue));
         adcbuffer[buffer_pos].timestamp = esp_timer_get_time();
@@ -158,9 +158,9 @@ void run_ads1015adc(void *args) {
         //     printcounter = 0;
         // }
         buffer_pos++;
-        if(buffer_pos > 4000) {
-            ESP_LOGI(TAG, "finished");
-            vTaskDelay(portMAX_DELAY);
+        if(buffer_pos == 4000) {
+            ESP_LOGI(TAG, "amount: 4000");            
+            write_register(ADS1X15_REG_POINTER_CONFIG, ADS1X15_REG_CONFIG_MODE_SINGLE);
         }
     }    
 
