@@ -60,6 +60,7 @@ lib64
 bin/*
 share/*
 pyvenv.cfg
+pycalc/
 
 # Virtual environment folders
 venv/

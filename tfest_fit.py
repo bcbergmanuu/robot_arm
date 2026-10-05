@@ -19,13 +19,14 @@ import numpy as np
 import tfest
 from scipy import signal
 
-DATA_FILE = "output.txt"
+DATA_FILE = "pid-current1.txt"
 
-TIME_COL = 0
-POSITION_COL = 1
-SPEED_COL = 2
-DRIVE_COL = 3
-CURRENT_COL = 4
+INDEX_COL = 0
+TIME_COL = 1
+POSITION_COL = 2
+SPEED_COL = 3
+PWM_COL = 4
+TORQUE_COL = 5
 
 
 class Fit(NamedTuple):
@@ -52,8 +53,8 @@ def load_data(path=DATA_FILE):
 
 def fit_transfer_function(
     path=DATA_FILE,
-    x_col=TIME_COL,
-    y_col=SPEED_COL,
+    x_col=PWM_COL,
+    y_col=TORQUE_COL,
     n_zeros=1,
     n_poles=2,
     time_col=TIME_COL,

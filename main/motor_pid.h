@@ -5,8 +5,6 @@
 #include "driver/pulse_cnt.h"
 #include "pid_ctrl.h"
 
-void motor_pid_control(void *arg);
-int update_pid_params();
 
 enum pid_controls {    
     pid_torque,
@@ -21,9 +19,8 @@ typedef struct {
     pid_ctrl_block_handle_t pid_controls[pid_control_count];  
     
     int position_measured, velocity_measured;
-
-    float position_target, velocity_target, target_torque, pwm_speedvalue, torque_measured;
-    
+    uint16_t torque_measured;
+    float position_target, velocity_target, target_torque, pwm_speedvalue;    
 } motor_control_context_t;
 
 
@@ -39,6 +36,7 @@ typedef struct
 } controls;
 
 void set_controls(controls c);
-void updateAdcValue(float value);
+void executePid(uint16_t adc_value);
+int motor_pid_control_init();
 
 #endif
