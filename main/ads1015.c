@@ -51,18 +51,19 @@ int write_register(uint8_t reg, uint16_t data_wr) {
     return i2c_master_transmit(dev_handle, buffer, 3, 500);
 }
 
-
-//LSB = FSR / 2^12
-//ex 512/2^12 = .125
 int read_adc(uint16_t * result) {
   // Read the conversion results
   int ret = 0; 
-  uint8_t buffer[2];
+  uint8_t buffer[2] = {0};
   ret |= read_register(ADS1X15_REG_POINTER_CONVERT, buffer);
   uint16_t adc_value = ((buffer[0] << 8) | buffer[1]);  
 
-  *result = adc_value;
-  
+  uint16_t internal = adc_value>>4;
+  if(internal > 2047) {
+    ESP_LOGE(TAG, "incorrect adc reading %d - %d, returned 1 instead",buffer[0], buffer[1] );
+    *result = 1;
+  }
+  *result = internal;
   return ret;  
 }
 
@@ -74,7 +75,7 @@ int config_adc() {
       ADS1X15_REG_CONFIG_CLAT_NONLAT |      
       ADS1X15_REG_CONFIG_CPOL_ACTVLOW |
       ADS1X15_REG_CONFIG_CMODE_TRAD |  
-      ADS1X15_REG_CONFIG_PGA_4_096V |
+      ADS1X15_REG_CONFIG_PGA_0_256V |
       RATE_ADS1015_3300SPS |
       ADS1X15_REG_CONFIG_MUX_SINGLE_0 |
       ADS1X15_REG_CONFIG_MODE_CONTIN |
@@ -164,7 +165,11 @@ void run_ads1015adc(void *args) {
         //     ESP_LOGI(TAG, "adcval = %u, volt: %f, ampPower %f \n", adcbuffer[buffer_pos].readvalue, volt, ampPower);                        
         //     printcounter = 0;
         // }
-        
+        buffer_pos++;
+        if(buffer_pos > 4000) {
+            ESP_LOGI(TAG, "finished");
+            vTaskDelay(portMAX_DELAY);
+        }
     }    
 
 }

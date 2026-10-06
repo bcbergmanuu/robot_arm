@@ -164,7 +164,7 @@ void set_controls(controls c) {
 #define storage_space 700
 static float torque_array[storage_space] = {0};
 static int target_pwm_array[storage_space] = {0};
-static int velocity_array[storage_space] = {0};
+static float velocity_array[storage_space] = {0};
 static int position_array[storage_space] = {0};
 static uint64_t time_array[storage_space] = {0};
 static int datapos = 0;
@@ -175,29 +175,23 @@ bool motor_measure(motor_control_context_t *ctx) {
     {
         case 0:
             ctx->pwm_speedvalue = 0;
+            break;        
+        case 10:
+            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX*.35;
             break;
-        case 100:
-            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX*.1;
-            break;
-        case 250:
-            ctx->pwm_speedvalue = 0;
-            break;              
-        case 350:
-            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX*.15;
-            break;
-        case 450:
+        case 400:
             ctx->pwm_speedvalue = 0;            
             break;
-        case 500:
-            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX*.2;
+        case 430:
+            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX*.35;
             break;        
-        case 550:
+        case 630:
             ctx->pwm_speedvalue = 0;
             break;        
-        case 600:
-            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX*.25;
-            break;        
         case 650:
+            ctx->pwm_speedvalue = BDC_MCPWM_DUTY_TICK_MAX*.35;
+            break;        
+        case 690:
             ctx->pwm_speedvalue = 0;
             break;        
         default:
@@ -217,7 +211,7 @@ bool motor_measure(motor_control_context_t *ctx) {
 
 void print_stepresponse() {        
     for(int x =0; x< storage_space; x++) {
-        printf("%d,%"PRIu64",%d,%d,%d,%-4.1f\n", x, time_array[x], position_array[x], velocity_array[x], target_pwm_array[x], torque_array[x]);
+        printf("%d,%"PRIu64",%d,%-4.1f,%d,%-4.1f\n", x, time_array[x], position_array[x], velocity_array[x], target_pwm_array[x], torque_array[x]);
     }
 }
 
@@ -347,7 +341,9 @@ void executePid(uint16_t adc_value) {
     //}
 
     
-    static int cur_pulse_cntr = 0, torque_loop_cntr =0, outer_loop_cnt = 0, display_cnt = 0;                        
+    static int cur_pulse_cntr = 0, torque_loop_cntr =0, outer_loop_cnt = 0, display_cnt = 0;  
+    static uint64_t speedTimer_lastTime;          
+    uint64_t speedTimer = esp_timer_get_time();
         
     //first time? 
     if(start_time == 0) {
@@ -372,12 +368,12 @@ void executePid(uint16_t adc_value) {
         pcnt_unit_get_count(motor_ctrl_ctx.pcnt_encoder, &cur_pulse_cntr);
         pcnt_unit_clear_count(motor_ctrl_ctx.pcnt_encoder);
         motor_ctrl_ctx.position_measured += cur_pulse_cntr;
-        motor_ctrl_ctx.velocity_measured = cur_pulse_cntr*1000;    //aanpassen!
+        motor_ctrl_ctx.velocity_measured = (float)cur_pulse_cntr/(float)(speedTimer-speedTimer_lastTime);
         //encoder
 
         torque_loop_cntr = 0;
         //pid_compute(motor_ctrl_ctx.pid_controls[pid_velocity], -((float)motor_ctrl_ctx.velocity_measured) + motor_ctrl_ctx.velocity_target, &motor_ctrl_ctx.target_torque); 
-
+        speedTimer_lastTime = speedTimer;
         
         if(outer_loop_cnt++ >= innerouter_ratio) {
             outer_loop_cnt = 0;

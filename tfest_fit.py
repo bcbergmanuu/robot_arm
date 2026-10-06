@@ -19,7 +19,7 @@ import numpy as np
 import tfest
 from scipy import signal
 
-DATA_FILE = "pid-current1.txt"
+DATA_FILE = "current5.csv"
 
 INDEX_COL = 0
 TIME_COL = 1

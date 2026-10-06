@@ -18,9 +18,9 @@ typedef struct {
     pcnt_unit_handle_t pcnt_encoder;
     pid_ctrl_block_handle_t pid_controls[pid_control_count];  
     
-    int position_measured, velocity_measured;
+    int position_measured;
     uint16_t torque_measured;
-    float position_target, velocity_target, target_torque, pwm_speedvalue;    
+    float position_target, velocity_target, target_torque, pwm_speedvalue, velocity_measured;    
 } motor_control_context_t;
 
 
